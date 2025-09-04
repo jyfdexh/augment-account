@@ -1,1 +1,29 @@
-
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>跳转中…</title>
+  <!-- 无 JS 时的兜底（不带 query/hash） -->
+  <meta http-equiv="refresh" content="0; url=augment-manager.html" />
+  <!-- 告诉搜索引擎规范地址，避免重复收录 -->
+  <link rel="canonical" href="augment-manager.html" />
+  <meta name="robots" content="noindex" />
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto;display:grid;place-items:center;height:100vh;margin:0}
+  </style>
+</head>
+<body>
+  <p>正在跳转到 <a href="augment-manager.html">augment-manager.html</a> …</p>
+  <script>
+    (function () {
+      // 保留 query 与 hash；保证在同一目录下跳转
+      var target = 'augment-manager.html' + location.search + location.hash;
+      var prefix = location.pathname.replace(/[^\/]*$/, '/');
+      location.replace(prefix + target); // 不留历史记录，返回键不会回到 index.html
+    })();
+  </script>
+  <noscript>
+    若未自动跳转，请点击上面的链接。
+  </noscript>
+</body>
+</html>
