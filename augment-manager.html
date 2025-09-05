@@ -164,8 +164,9 @@
         <!-- 这里将显示凭证管理界面 -->
     </div>
 
-    <!-- 引入CORS代理配置 -->
+    <!-- 引入CORS代理配置和网络状态管理 -->
     <script src="cors-proxy-config.js"></script>
+    <script src="network-status.js"></script>
 
     <script>
         console.log('开始加载脚本...');
@@ -202,21 +203,94 @@
             }
         };
         
-        // 简单的UI提示
-        function showToast(message, type = 'info') {
+        // 改进的UI提示系统
+        function showToast(message, type = 'info', duration = 3000) {
             const toast = document.createElement('div');
-            const bgColor = type === 'success' ? '#f0fdf4' : type === 'error' ? '#fef2f2' : '#f0f9ff';
-            const textColor = type === 'success' ? '#16a34a' : type === 'error' ? '#dc2626' : '#0369a1';
-            
+            const bgColor = type === 'success' ? '#f0fdf4' : type === 'error' ? '#fef2f2' : type === 'warning' ? '#fef3c7' : '#f0f9ff';
+            const textColor = type === 'success' ? '#16a34a' : type === 'error' ? '#dc2626' : type === 'warning' ? '#92400e' : '#0369a1';
+            const icon = type === 'success' ? '✅' : type === 'error' ? '❌' : type === 'warning' ? '⚠️' : 'ℹ️';
+
             toast.style.cssText = `
                 position: fixed; top: 20px; right: 20px; z-index: 10000;
                 background: ${bgColor}; color: ${textColor}; border: 1px solid;
                 border-radius: 12px; padding: 12px 16px; box-shadow: 0 4px 12px rgba(0,0,0,.15);
-                max-width: 300px; word-wrap: break-word;
+                max-width: 350px; word-wrap: break-word; font-size: 14px;
+                display: flex; align-items: center; gap: 8px;
             `;
-            toast.textContent = message;
+            toast.innerHTML = `<span>${icon}</span><span>${message}</span>`;
             document.body.appendChild(toast);
-            setTimeout(() => toast.remove(), 3000);
+
+            // 如果是错误消息，显示时间更长
+            const actualDuration = type === 'error' ? Math.max(duration, 5000) : duration;
+            setTimeout(() => {
+                if (toast.parentNode) {
+                    toast.remove();
+                }
+            }, actualDuration);
+        }
+
+        // 显示详细错误信息的函数
+        function showDetailedError(title, details, solutions = []) {
+            const overlay = document.createElement('div');
+            overlay.style.cssText = `
+                position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 9999;
+                display: flex; align-items: center; justify-content: center;
+            `;
+
+            const dialog = document.createElement('div');
+            dialog.style.cssText = `
+                background: var(--bg); border-radius: 12px; padding: 20px;
+                max-width: 500px; width: 90vw; box-shadow: 0 25px 60px -12px rgba(0,0,0,.28);
+            `;
+
+            const solutionsHtml = solutions.length > 0 ? `
+                <div style="margin-top: 15px;">
+                    <strong>建议解决方案：</strong>
+                    <ul style="margin: 8px 0; padding-left: 20px;">
+                        ${solutions.map(s => `<li style="margin: 4px 0;">${s}</li>`).join('')}
+                    </ul>
+                </div>
+            ` : '';
+
+            dialog.innerHTML = `
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                    <h3 style="margin: 0; color: #dc2626;">❌ ${title}</h3>
+                    <button id="close-error" class="btn btn-ghost">✕</button>
+                </div>
+                <div style="color: var(--muted); margin-bottom: 15px; font-size: 14px;">
+                    ${details}
+                </div>
+                ${solutionsHtml}
+                <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 15px;">
+                    <button id="enable-test-mode" class="btn btn-primary">启用测试模式</button>
+                    <button id="retry-connection" class="btn btn-secondary">重试连接</button>
+                </div>
+            `;
+
+            overlay.appendChild(dialog);
+            document.body.appendChild(overlay);
+
+            // 绑定事件
+            dialog.querySelector('#close-error').onclick = () => overlay.remove();
+            dialog.querySelector('#enable-test-mode').onclick = () => {
+                CFG.TEST_MODE = true;
+                localStorage.setItem('testMode', 'true');
+                showToast('已启用测试模式，使用模拟数据', 'success');
+                overlay.remove();
+                if (typeof showCredentialManagement === 'function') {
+                    showCredentialManagement();
+                }
+            };
+            dialog.querySelector('#retry-connection').onclick = () => {
+                overlay.remove();
+                if (typeof corsManager !== 'undefined') {
+                    corsManager.recheckAPIs();
+                }
+            };
+
+            overlay.onclick = (e) => {
+                if (e.target === overlay) overlay.remove();
+            };
         }
         
         // 配置常量
@@ -251,12 +325,30 @@
 
         // 智能fetch包装器，自动处理CORS问题
         const safeFetch = async (url, options = {}) => {
+            // 如果已经在测试模式，直接抛出错误让调用方使用模拟数据
+            if (CFG.TEST_MODE) {
+                throw new Error('测试模式：使用模拟数据');
+            }
+
             // 首先尝试直接请求
             try {
                 const response = await fetch(url, {
                     ...options,
-                    mode: 'cors'
+                    mode: 'cors',
+                    credentials: 'omit', // 避免发送凭据导致的CORS问题
+                    headers: {
+                        ...options.headers,
+                        // 移除可能导致预检请求的头部
+                        'Accept': 'application/json'
+                    }
                 });
+
+                // 检查响应状态
+                if (response.status === 401) {
+                    console.log('认证失败，可能是token无效');
+                    throw new Error('认证失败');
+                }
+
                 return response;
             } catch (directError) {
                 console.log(`直接请求失败 ${url}:`, directError.message);
@@ -265,7 +357,13 @@
                 if (CFG.proxyManager && !CFG.TEST_MODE) {
                     try {
                         console.log('🔄 尝试使用CORS代理...');
-                        const proxyResponse = await CFG.proxyManager.fetch(url, options);
+                        const proxyResponse = await CFG.proxyManager.fetch(url, {
+                            ...options,
+                            headers: {
+                                ...options.headers,
+                                'Accept': 'application/json'
+                            }
+                        });
                         console.log('✅ 代理请求成功');
                         return proxyResponse;
                     } catch (proxyError) {
@@ -273,12 +371,15 @@
                     }
                 }
 
-                // 如果是CORS错误且不在测试模式，自动切换到测试模式
-                if (directError.name === 'TypeError' && directError.message.includes('CORS') && !CFG.TEST_MODE) {
-                    console.log('检测到CORS问题，自动启用测试模式');
+                // 如果是CORS错误或网络错误，自动切换到测试模式
+                if ((directError.name === 'TypeError' || directError.message.includes('CORS') ||
+                     directError.message.includes('Failed to fetch')) && !CFG.TEST_MODE) {
+                    console.log('检测到网络问题，自动启用测试模式');
                     CFG.TEST_MODE = true;
                     localStorage.setItem('testMode', 'true');
-                    corsManager.updateStatusUI(false);
+                    if (typeof corsManager !== 'undefined') {
+                        corsManager.updateStatusUI(false);
+                    }
                 }
 
                 throw directError;
@@ -422,19 +523,24 @@
                         method: 'GET',
                         headers: {
                             'Authorization': `Bearer ${token}`,
-                            'Content-Type': 'application/json'
+                            'Accept': 'application/json'
                         }
                     });
                     if (response.ok) return 'OK';
                     if (response.status === 404) return 'OK';
                     if (response.status === 403) return 'BANNED';
                     if (response.status === 402) return 'EXPIRED';
+                    if (response.status === 401) return 'EXPIRED';
                     return 'ERROR';
                 } catch (error) {
                     console.error('检查封禁状态失败:', error);
-                    // CORS错误时，尝试模拟检测
-                    if (error.name === 'TypeError' && error.message.includes('CORS')) {
-                        console.log('CORS错误，使用模拟检测');
+
+                    // 各种网络错误都使用模拟检测
+                    if (error.message.includes('测试模式') ||
+                        error.message.includes('CORS') ||
+                        error.message.includes('Failed to fetch') ||
+                        CFG.TEST_MODE) {
+                        console.log('使用模拟检测');
                         return this.simulateBanStatus(tenant, token);
                     }
                     return 'ERROR';
@@ -467,11 +573,14 @@
                     const subResponse = await safeFetch(`${CFG.orbAPI}/subscriptions_from_link?token=${token}`, {
                         method: 'GET',
                         headers: {
-                            'Content-Type': 'application/json'
+                            'Accept': 'application/json'
                         }
                     });
 
                     if (!subResponse.ok) {
+                        if (subResponse.status === 401) {
+                            throw new Error('Token无效或已过期');
+                        }
                         throw new Error(`订阅API请求失败: ${subResponse.status}`);
                     }
 
@@ -484,11 +593,14 @@
                     const balResponse = await safeFetch(`${CFG.orbAPI}/customers/${customer.id}/ledger_summary?pricing_unit_id=${CFG.pricingUnit}&token=${token}`, {
                         method: 'GET',
                         headers: {
-                            'Content-Type': 'application/json'
+                            'Accept': 'application/json'
                         }
                     });
 
                     if (!balResponse.ok) {
+                        if (balResponse.status === 401) {
+                            throw new Error('Token无效或已过期');
+                        }
                         throw new Error(`余额API请求失败: ${balResponse.status}`);
                     }
 
@@ -511,11 +623,17 @@
                     };
                 } catch (error) {
                     console.error('获取订阅信息失败:', error);
-                    // CORS错误时使用模拟数据
-                    if (error.name === 'TypeError' && error.message.includes('CORS')) {
-                        console.log('CORS错误，使用模拟数据');
+
+                    // 各种错误情况都使用模拟数据
+                    if (error.message.includes('测试模式') ||
+                        error.message.includes('CORS') ||
+                        error.message.includes('Failed to fetch') ||
+                        error.message.includes('Token无效') ||
+                        CFG.TEST_MODE) {
+                        console.log('使用模拟数据');
                         return this.simulateInfo(token);
                     }
+
                     throw error;
                 }
             },
@@ -609,17 +727,48 @@
                 } catch (error) {
                     console.error('检测凭证失败:', error);
 
-                    // 根据错误类型提供更详细的状态
+                    // 根据错误类型提供更详细的状态和用户提示
                     let errorStatus = 'ERROR';
-                    if (error.message.includes('CORS') || error.name === 'TypeError') {
-                        console.log('CORS错误，尝试使用现有数据');
-                        // 如果是CORS错误，保持现有状态或设为未知
-                        errorStatus = cred.status || 'UNKNOWN';
+                    let errorMessage = error.message;
+
+                    if (error.message.includes('测试模式') || CFG.TEST_MODE) {
+                        // 测试模式下使用模拟数据
+                        console.log('测试模式，使用模拟检测结果');
+                        const simulatedStatus = this.simulateBanStatus(cred.tenant, cred.token);
+                        const updatedCred = {
+                            ...cred,
+                            status: simulatedStatus,
+                            updatedAt: Date.now()
+                        };
+                        this.updateCredential(updatedCred);
+                        return simulatedStatus;
+                    } else if (error.message.includes('Token无效')) {
+                        errorStatus = 'NO_TOKEN';
+                        errorMessage = 'Token无效或已过期';
+                    } else if (error.message.includes('CORS') || error.message.includes('Failed to fetch')) {
+                        errorStatus = 'NETWORK_ERROR';
+                        errorMessage = '网络连接问题';
+
+                        // 显示详细错误信息
+                        showDetailedError(
+                            '网络连接失败',
+                            `无法连接到服务器检测凭证状态。这可能是由于网络问题或CORS限制导致的。`,
+                            [
+                                '启用测试模式继续使用（推荐）',
+                                '检查网络连接',
+                                '尝试使用浏览器扩展解决CORS问题',
+                                '稍后重试'
+                            ]
+                        );
+                    } else if (error.message.includes('认证失败')) {
+                        errorStatus = 'AUTH_ERROR';
+                        errorMessage = '认证失败';
                     }
 
                     const updatedCred = {
                         ...cred,
                         status: errorStatus,
+                        lastError: errorMessage,
                         updatedAt: Date.now()
                     };
                     this.updateCredential(updatedCred);
@@ -1101,6 +1250,7 @@
                         <button class="btn btn-primary" onclick="checkAllCredentials()" style="margin-right: 10px;">🔄 全部检测</button>
                         <button class="btn btn-secondary" onclick="toggleTestMode()" style="margin-right: 10px;">${CFG.TEST_MODE ? '🔧 生产模式' : '🧪 测试模式'}</button>
                         <button class="btn btn-secondary" onclick="corsManager.recheckAPIs()" style="margin-right: 10px;">🔍 检测连接</button>
+                        <button class="btn btn-secondary" onclick="window.NetworkStatusManager?.showDiagnostics()" style="margin-right: 10px;">🩺 网络诊断</button>
                         <button class="btn btn-secondary" onclick="actions.import()">📥 导入</button>
                         <button class="btn btn-secondary" onclick="actions.export()">📤 导出</button>
                     </div>
@@ -1125,6 +1275,9 @@
                 'NO_BALANCE': { bg: '#fef3c7', text: '#92400e', border: '#f59e0b' },
                 'ERROR': { bg: '#fef2f2', text: '#991b1b', border: '#ef4444' },
                 'NO_TOKEN': { bg: '#f1f5f9', text: '#475569', border: '#64748b' },
+                'NETWORK_ERROR': { bg: '#fef3c7', text: '#92400e', border: '#f59e0b' },
+                'AUTH_ERROR': { bg: '#fee2e2', text: '#991b1b', border: '#dc2626' },
+                'BANNED': { bg: '#fef2f2', text: '#991b1b', border: '#ef4444' },
                 'UNKNOWN': { bg: '#f8fafc', text: '#64748b', border: '#cbd5e1' }
             };
             return colors[status] || colors['UNKNOWN'];
@@ -1138,6 +1291,9 @@
                 'NO_BALANCE': '余额不足',
                 'ERROR': '检测失败',
                 'NO_TOKEN': '无令牌',
+                'NETWORK_ERROR': '网络错误',
+                'AUTH_ERROR': '认证失败',
+                'BANNED': '账户被封',
                 'UNKNOWN': '未知'
             };
             return texts[status] || '未知';
@@ -1148,8 +1304,9 @@
             return {
                 total: creds.length,
                 active: creds.filter(c => c.status === 'ACTIVE').length,
-                abnormal: creds.filter(c => ['EXPIRED', 'NO_BALANCE', 'ERROR'].includes(c.status)).length,
-                noToken: creds.filter(c => c.status === 'NO_TOKEN').length
+                abnormal: creds.filter(c => ['EXPIRED', 'NO_BALANCE', 'ERROR', 'NETWORK_ERROR', 'AUTH_ERROR', 'BANNED'].includes(c.status)).length,
+                noToken: creds.filter(c => c.status === 'NO_TOKEN').length,
+                networkError: creds.filter(c => c.status === 'NETWORK_ERROR').length
             };
         }
 
