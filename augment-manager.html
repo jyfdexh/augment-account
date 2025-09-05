@@ -164,8 +164,18 @@
         <!-- 这里将显示凭证管理界面 -->
     </div>
 
+    <!-- 引入CORS代理配置 -->
+    <script src="cors-proxy-config.js"></script>
+
     <script>
         console.log('开始加载脚本...');
+
+        // 注册 Service Worker（可选）
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('cors-proxy-sw.js')
+                .then(registration => console.log('🔧 Service Worker 注册成功'))
+                .catch(error => console.log('Service Worker 注册失败:', error));
+        }
         
         // 基础工具函数
         const $ = s => document.querySelector(s);
@@ -219,12 +229,10 @@
             PAGE_SIZE: 18,
             // 测试模式：当CORS失败时使用模拟数据
             TEST_MODE: false,
-            // CORS代理选项
-            CORS_PROXIES: [
-                'https://cors-anywhere.herokuapp.com/',
-                'https://api.allorigins.win/raw?url=',
-                'https://corsproxy.io/?'
-            ],
+            // CORS代理选项（已移至 cors-proxy-config.js）
+            CORS_PROXIES: [],
+            // 智能代理管理器
+            proxyManager: null,
             // API连接状态
             API_STATUS: {
                 auth: 'unknown',
@@ -241,26 +249,39 @@
         const sha256 = s => crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
         const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
 
-        // 全局fetch包装器，自动处理CORS问题
+        // 智能fetch包装器，自动处理CORS问题
         const safeFetch = async (url, options = {}) => {
+            // 首先尝试直接请求
             try {
                 const response = await fetch(url, {
                     ...options,
                     mode: 'cors'
                 });
                 return response;
-            } catch (error) {
-                console.log(`CORS错误 ${url}:`, error.message);
+            } catch (directError) {
+                console.log(`直接请求失败 ${url}:`, directError.message);
+
+                // 尝试使用智能代理
+                if (CFG.proxyManager && !CFG.TEST_MODE) {
+                    try {
+                        console.log('🔄 尝试使用CORS代理...');
+                        const proxyResponse = await CFG.proxyManager.fetch(url, options);
+                        console.log('✅ 代理请求成功');
+                        return proxyResponse;
+                    } catch (proxyError) {
+                        console.log('❌ 代理请求也失败:', proxyError.message);
+                    }
+                }
 
                 // 如果是CORS错误且不在测试模式，自动切换到测试模式
-                if (error.name === 'TypeError' && error.message.includes('CORS') && !CFG.TEST_MODE) {
+                if (directError.name === 'TypeError' && directError.message.includes('CORS') && !CFG.TEST_MODE) {
                     console.log('检测到CORS问题，自动启用测试模式');
                     CFG.TEST_MODE = true;
                     localStorage.setItem('testMode', 'true');
                     corsManager.updateStatusUI(false);
                 }
 
-                throw error;
+                throw directError;
             }
         };
 
@@ -1411,32 +1432,37 @@
             },
 
             async tryProxy() {
-                showToast('正在尝试CORS代理...', 'info');
+                showToast('正在检测CORS代理...', 'info');
 
-                for (const proxy of CFG.CORS_PROXIES) {
-                    try {
-                        const testUrl = proxy + encodeURIComponent(CFG.orbAPI + '/ping');
-                        const response = await fetch(testUrl, {
-                            method: 'GET',
-                            timeout: 3000
-                        });
+                try {
+                    // 初始化智能代理管理器
+                    if (window.SmartCORSProxy) {
+                        const success = await window.SmartCORSProxy.init();
 
-                        if (response.ok) {
-                            showToast(`代理 ${proxy} 可用！`, 'success');
-                            // 更新配置使用代理
-                            CFG.orbAPI = proxy + encodeURIComponent(CFG.orbAPI);
-                            CFG.authURL = proxy + encodeURIComponent(CFG.authURL);
-                            CFG.TEST_MODE = false;
-                            localStorage.setItem('testMode', 'false');
-                            this.updateStatusUI(true);
-                            return;
+                        if (success) {
+                            CFG.proxyManager = window.SmartCORSProxy;
+                            const status = CFG.proxyManager.getStatus();
+
+                            showToast(`✅ 找到可用代理: ${status.currentProxy}`, 'success');
+
+                            // 测试代理是否真的可用
+                            try {
+                                await CFG.proxyManager.fetch('https://httpbin.org/json');
+                                CFG.TEST_MODE = false;
+                                localStorage.setItem('testMode', 'false');
+                                this.updateStatusUI(true);
+                                return;
+                            } catch (testError) {
+                                console.log('代理测试失败:', testError);
+                            }
                         }
-                    } catch (error) {
-                        console.log(`代理 ${proxy} 不可用:`, error);
                     }
-                }
 
-                showToast('所有代理都不可用，继续使用测试模式', 'info');
+                    showToast('❌ 没有找到可用的代理，继续使用测试模式', 'info');
+                } catch (error) {
+                    console.error('代理初始化失败:', error);
+                    showToast('代理初始化失败，继续使用测试模式', 'error');
+                }
             },
 
             showCORSSolutions() {
