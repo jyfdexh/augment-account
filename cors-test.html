@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CORS 代理测试工具</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f8fafc;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,.1);
+        }
+        
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            margin: 4px;
+            transition: all 0.2s;
+        }
+        
+        .btn-primary { background: #3b82f6; color: white; }
+        .btn-primary:hover { background: #2563eb; }
+        .btn-secondary { background: #6b7280; color: white; }
+        .btn-secondary:hover { background: #4b5563; }
+        
+        .status {
+            padding: 12px;
+            border-radius: 8px;
+            margin: 10px 0;
+        }
+        
+        .status.success { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; }
+        .status.error { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
+        .status.info { background: #f0f9ff; color: #0369a1; border: 1px solid #bae6fd; }
+        
+        .log {
+            background: #1f2937;
+            color: #f9fafb;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+        
+        input, select {
+            padding: 8px 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 14px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+        
+        @media (max-width: 600px) {
+            .grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>🔧 CORS 代理测试工具</h1>
+        <p>用于测试各种CORS代理服务的可用性，为GitHub Pages部署做准备。</p>
+    </div>
+
+    <div class="card">
+        <h3>🎯 快速测试</h3>
+        <div class="grid">
+            <div>
+                <label>测试URL:</label>
+                <input type="text" id="testUrl" value="https://httpbin.org/json" placeholder="输入要测试的URL">
+            </div>
+            <div>
+                <label>请求方法:</label>
+                <select id="testMethod">
+                    <option value="GET">GET</option>
+                    <option value="POST">POST</option>
+                    <option value="PUT">PUT</option>
+                    <option value="DELETE">DELETE</option>
+                </select>
+            </div>
+        </div>
+        <div style="margin-top: 15px;">
+            <button class="btn btn-primary" onclick="testDirect()">🚀 直接请求</button>
+            <button class="btn btn-secondary" onclick="testAllProxies()">🔄 测试所有代理</button>
+            <button class="btn btn-secondary" onclick="testBestProxy()">⚡ 智能代理</button>
+            <button class="btn btn-secondary" onclick="clearLog()">🗑️ 清空日志</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>📊 代理状态</h3>
+        <div id="proxyStatus">正在初始化...</div>
+    </div>
+
+    <div class="card">
+        <h3>📝 测试日志</h3>
+        <div id="log" class="log">等待测试...\n</div>
+    </div>
+
+    <!-- 引入代理配置 -->
+    <script src="cors-proxy-config.js"></script>
+    
+    <script>
+        let logContent = '';
+
+        function log(message, type = 'info') {
+            const timestamp = new Date().toLocaleTimeString();
+            const prefix = type === 'error' ? '❌' : type === 'success' ? '✅' : 'ℹ️';
+            logContent += `[${timestamp}] ${prefix} ${message}\n`;
+            document.getElementById('log').textContent = logContent;
+            document.getElementById('log').scrollTop = document.getElementById('log').scrollHeight;
+        }
+
+        function clearLog() {
+            logContent = '';
+            document.getElementById('log').textContent = '日志已清空...\n';
+        }
+
+        async function testDirect() {
+            const url = document.getElementById('testUrl').value;
+            const method = document.getElementById('testMethod').value;
+            
+            if (!url) {
+                log('请输入测试URL', 'error');
+                return;
+            }
+
+            log(`开始直接请求: ${method} ${url}`);
+            
+            try {
+                const response = await fetch(url, {
+                    method: method,
+                    mode: 'cors',
+                    headers: {
+                        'Accept': 'application/json'
+                    }
+                });
+
+                if (response.ok) {
+                    const data = await response.text();
+                    log(`直接请求成功 (${response.status})`, 'success');
+                    log(`响应长度: ${data.length} 字符`);
+                } else {
+                    log(`直接请求失败: HTTP ${response.status}`, 'error');
+                }
+            } catch (error) {
+                log(`直接请求错误: ${error.message}`, 'error');
+            }
+        }
+
+        async function testAllProxies() {
+            const url = document.getElementById('testUrl').value;
+            if (!url) {
+                log('请输入测试URL', 'error');
+                return;
+            }
+
+            log('开始测试所有代理服务...');
+            
+            const proxies = window.CORSProxyConfig.proxies;
+            let workingCount = 0;
+
+            for (const proxy of proxies) {
+                try {
+                    log(`测试代理: ${proxy.name}`);
+                    const proxyUrl = proxy.url + encodeURIComponent(url);
+                    
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+                    const response = await fetch(proxyUrl, {
+                        method: 'GET',
+                        signal: controller.signal,
+                        headers: {
+                            'Accept': 'application/json'
+                        }
+                    });
+
+                    clearTimeout(timeoutId);
+
+                    if (response.ok) {
+                        const data = await response.text();
+                        log(`✅ ${proxy.name} 可用 (${response.status}) - ${data.length}字符`, 'success');
+                        workingCount++;
+                    } else {
+                        log(`❌ ${proxy.name} 不可用 (${response.status})`, 'error');
+                    }
+                } catch (error) {
+                    log(`❌ ${proxy.name} 错误: ${error.message}`, 'error');
+                }
+            }
+
+            log(`测试完成！可用代理: ${workingCount}/${proxies.length}`, workingCount > 0 ? 'success' : 'error');
+            updateProxyStatus();
+        }
+
+        async function testBestProxy() {
+            const url = document.getElementById('testUrl').value;
+            if (!url) {
+                log('请输入测试URL', 'error');
+                return;
+            }
+
+            log('初始化智能代理管理器...');
+            
+            try {
+                const success = await window.SmartCORSProxy.init();
+                
+                if (success) {
+                    const status = window.SmartCORSProxy.getStatus();
+                    log(`智能代理初始化成功，当前代理: ${status.currentProxy}`, 'success');
+                    
+                    log(`使用智能代理请求: ${url}`);
+                    const response = await window.SmartCORSProxy.fetch(url);
+                    
+                    if (response.ok) {
+                        const data = await response.text();
+                        log(`智能代理请求成功 (${response.status}) - ${data.length}字符`, 'success');
+                    } else {
+                        log(`智能代理请求失败: HTTP ${response.status}`, 'error');
+                    }
+                } else {
+                    log('没有找到可用的代理服务', 'error');
+                }
+            } catch (error) {
+                log(`智能代理错误: ${error.message}`, 'error');
+            }
+            
+            updateProxyStatus();
+        }
+
+        function updateProxyStatus() {
+            const statusDiv = document.getElementById('proxyStatus');
+            
+            if (window.SmartCORSProxy && window.SmartCORSProxy.workingProxies) {
+                const status = window.SmartCORSProxy.getStatus();
+                statusDiv.innerHTML = `
+                    <div class="status ${status.hasProxy ? 'success' : 'error'}">
+                        <strong>代理状态:</strong> ${status.hasProxy ? '可用' : '不可用'}<br>
+                        <strong>当前代理:</strong> ${status.currentProxy}<br>
+                        <strong>可用数量:</strong> ${status.workingCount}<br>
+                        <strong>失败数量:</strong> ${status.failedCount}
+                    </div>
+                `;
+            } else {
+                statusDiv.innerHTML = '<div class="status info">尚未进行代理检测</div>';
+            }
+        }
+
+        // 页面加载时更新状态
+        document.addEventListener('DOMContentLoaded', () => {
+            log('CORS代理测试工具已加载');
+            updateProxyStatus();
+        });
+    </script>
+</body>
+</html>
