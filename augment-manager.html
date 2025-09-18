@@ -147,6 +147,7 @@
         <button id="nav-auth" class="btn btn-primary">🚀 获取令牌</button>
         <button id="nav-import" class="btn btn-ghost">📥 导入数据</button>
         <button id="nav-export" class="btn btn-ghost">📤 导出数据</button>
+        <button id="nav-proxy" class="btn btn-ghost">🌐 代理配置</button>
     </div>
 
     <div id="status" class="status-box">
@@ -158,6 +159,9 @@
             ✅ 系统就绪，可以开始使用各项功能
         </div>
     </div>
+
+    <!-- CORS 连接状态展示 -->
+    <div id="cors-status" class="status-box" style="display: none;"></div>
 
     <!-- 主要内容区域 -->
     <div id="main-content" style="margin-top: 20px;">
@@ -262,7 +266,8 @@
                 </div>
                 ${solutionsHtml}
                 <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 15px;">
-                    <button id="enable-test-mode" class="btn btn-primary">启用测试模式</button>
+                    <button id="retry-with-proxy" class="btn btn-primary">使用代理重试</button>
+                    <button id="open-cors-solutions" class="btn btn-secondary">查看方案</button>
                     <button id="retry-connection" class="btn btn-secondary">重试连接</button>
                 </div>
             `;
@@ -272,14 +277,13 @@
 
             // 绑定事件
             dialog.querySelector('#close-error').onclick = () => overlay.remove();
-            dialog.querySelector('#enable-test-mode').onclick = () => {
-                CFG.TEST_MODE = true;
-                localStorage.setItem('testMode', 'true');
-                showToast('已启用测试模式，使用模拟数据', 'success');
+            dialog.querySelector('#retry-with-proxy').onclick = async () => {
                 overlay.remove();
-                if (typeof showCredentialManagement === 'function') {
-                    showCredentialManagement();
-                }
+                try { await corsManager.tryProxy(); } catch {}
+            };
+            dialog.querySelector('#open-cors-solutions').onclick = () => {
+                overlay.remove();
+                corsManager.showCORSSolutions();
             };
             dialog.querySelector('#retry-connection').onclick = () => {
                 overlay.remove();
@@ -301,10 +305,6 @@
             pricingUnit: 'jWTJo9ptbapMWkvg',
             CONCURRENCY: 4,
             PAGE_SIZE: 18,
-            // 测试模式：当CORS失败时使用模拟数据
-            TEST_MODE: false,
-            // CORS代理选项（已移至 cors-proxy-config.js）
-            CORS_PROXIES: [],
             // 智能代理管理器
             proxyManager: null,
             // API连接状态
@@ -323,40 +323,59 @@
         const sha256 = s => crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
         const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
 
-        // 智能fetch包装器，自动处理CORS问题
+        // 智能fetch包装器：GET 优先代理；非GET 先直连后代理
         const safeFetch = async (url, options = {}) => {
-            // 如果已经在测试模式，直接抛出错误让调用方使用模拟数据
-            if (CFG.TEST_MODE) {
-                throw new Error('测试模式：使用模拟数据');
+            // 确保代理管理器已初始化
+            if (!CFG.proxyManager && window.SmartCORSProxy) {
+                try {
+                    const ok = await window.SmartCORSProxy.init();
+                    if (ok) CFG.proxyManager = window.SmartCORSProxy;
+                } catch (e) {
+                    console.log('初始化CORS代理失败:', e?.message);
+                }
             }
 
-            // 首先尝试直接请求
+            const method = (options.method || 'GET').toUpperCase();
+
+            // GET: 优先代理
+            if (method === 'GET' && CFG.proxyManager) {
+                try {
+                    const proxyResponse = await CFG.proxyManager.fetch(url, {
+                        ...options,
+                        headers: {
+                            ...options.headers,
+                            'Accept': 'application/json'
+                        }
+                    });
+                    // 代理返回 401/403 可能源自代理限制（未激活/预检等），触发直连回退
+                    if (proxyResponse.status === 401 || proxyResponse.status === 403) {
+                        throw new Error('代理未授权或禁止，触发直连回退');
+                    }
+                    return proxyResponse;
+                } catch (proxyError) {
+                    console.log('代理请求失败，尝试直接请求:', proxyError.message);
+                }
+            }
+
+            // 直连尝试（非GET优先；或GET的代理失败时回退）
             try {
                 const response = await fetch(url, {
                     ...options,
                     mode: 'cors',
-                    credentials: 'omit', // 避免发送凭据导致的CORS问题
+                    credentials: 'omit',
                     headers: {
                         ...options.headers,
-                        // 移除可能导致预检请求的头部
                         'Accept': 'application/json'
                     }
                 });
-
-                // 检查响应状态
                 if (response.status === 401) {
-                    console.log('认证失败，可能是token无效');
                     throw new Error('认证失败');
                 }
-
                 return response;
-            } catch (directError) {
-                console.log(`直接请求失败 ${url}:`, directError.message);
-
-                // 尝试使用智能代理
-                if (CFG.proxyManager && !CFG.TEST_MODE) {
+            } catch (directErr) {
+                // 非GET：直连失败再尝试代理
+                if (method !== 'GET' && CFG.proxyManager) {
                     try {
-                        console.log('🔄 尝试使用CORS代理...');
                         const proxyResponse = await CFG.proxyManager.fetch(url, {
                             ...options,
                             headers: {
@@ -364,25 +383,16 @@
                                 'Accept': 'application/json'
                             }
                         });
-                        console.log('✅ 代理请求成功');
+                        if (proxyResponse.status === 401) {
+                            throw new Error('认证失败');
+                        }
                         return proxyResponse;
-                    } catch (proxyError) {
-                        console.log('❌ 代理请求也失败:', proxyError.message);
+                    } catch (proxyErr) {
+                        console.log('直连与代理均失败:', proxyErr.message);
+                        throw proxyErr;
                     }
                 }
-
-                // 如果是CORS错误或网络错误，自动切换到测试模式
-                if ((directError.name === 'TypeError' || directError.message.includes('CORS') ||
-                     directError.message.includes('Failed to fetch')) && !CFG.TEST_MODE) {
-                    console.log('检测到网络问题，自动启用测试模式');
-                    CFG.TEST_MODE = true;
-                    localStorage.setItem('testMode', 'true');
-                    if (typeof corsManager !== 'undefined') {
-                        corsManager.updateStatusUI(false);
-                    }
-                }
-
-                throw directError;
+                throw directErr;
             }
         };
 
@@ -534,37 +544,8 @@
                     return 'ERROR';
                 } catch (error) {
                     console.error('检查封禁状态失败:', error);
-
-                    // 各种网络错误都使用模拟检测
-                    if (error.message.includes('测试模式') ||
-                        error.message.includes('CORS') ||
-                        error.message.includes('Failed to fetch') ||
-                        CFG.TEST_MODE) {
-                        console.log('使用模拟检测');
-                        return this.simulateBanStatus(tenant, token);
-                    }
                     return 'ERROR';
                 }
-            },
-
-            simulateBanStatus(tenant, token) {
-                // 基于token和tenant的简单模拟
-                if (!token || token.length < 32) return 'NO_TOKEN';
-                // 模拟一些状态
-                const hash = this.simpleHash(token + tenant);
-                if (hash % 10 === 0) return 'BANNED';
-                if (hash % 8 === 0) return 'EXPIRED';
-                return 'OK';
-            },
-
-            simpleHash(str) {
-                let hash = 0;
-                for (let i = 0; i < str.length; i++) {
-                    const char = str.charCodeAt(i);
-                    hash = ((hash << 5) - hash) + char;
-                    hash = hash & hash; // Convert to 32bit integer
-                }
-                return Math.abs(hash);
             },
 
             async info(token) {
@@ -623,38 +604,10 @@
                     };
                 } catch (error) {
                     console.error('获取订阅信息失败:', error);
-
-                    // 各种错误情况都使用模拟数据
-                    if (error.message.includes('测试模式') ||
-                        error.message.includes('CORS') ||
-                        error.message.includes('Failed to fetch') ||
-                        error.message.includes('Token无效') ||
-                        CFG.TEST_MODE) {
-                        console.log('使用模拟数据');
-                        return this.simulateInfo(token);
-                    }
-
                     throw error;
                 }
             },
-
-            simulateInfo(token) {
-                // 基于token生成更真实的模拟数据
-                const hash = this.simpleHash(token);
-                const balances = [0, 2.5, 5.5, 12.3, 25.0, 50.0, 100.0, 150.0];
-                const includes = [50.0, 100.0, 200.0, 500.0];
-                const emails = [
-                    'demo@outlook.com', 'test@gmail.com', 'user@hotmail.com',
-                    'sample@yahoo.com', 'example@163.com', 'mock@qq.com'
-                ];
-
-                return {
-                    email: emails[hash % emails.length],
-                    balance: balances[hash % balances.length],
-                    endDate: new Date(Date.now() + (hash % 90 + 30) * 24 * 60 * 60 * 1000).toISOString(),
-                    included: includes[hash % includes.length]
-                };
-            },
+            
 
             async check(cred) {
                 console.log(`开始检测凭证: ${cred.email || cred.id}`);
@@ -730,19 +683,7 @@
                     // 根据错误类型提供更详细的状态和用户提示
                     let errorStatus = 'ERROR';
                     let errorMessage = error.message;
-
-                    if (error.message.includes('测试模式') || CFG.TEST_MODE) {
-                        // 测试模式下使用模拟数据
-                        console.log('测试模式，使用模拟检测结果');
-                        const simulatedStatus = this.simulateBanStatus(cred.tenant, cred.token);
-                        const updatedCred = {
-                            ...cred,
-                            status: simulatedStatus,
-                            updatedAt: Date.now()
-                        };
-                        this.updateCredential(updatedCred);
-                        return simulatedStatus;
-                    } else if (error.message.includes('Token无效')) {
+                    if (error.message.includes('Token无效')) {
                         errorStatus = 'NO_TOKEN';
                         errorMessage = 'Token无效或已过期';
                     } else if (error.message.includes('CORS') || error.message.includes('Failed to fetch')) {
@@ -754,7 +695,8 @@
                             '网络连接失败',
                             `无法连接到服务器检测凭证状态。这可能是由于网络问题或CORS限制导致的。`,
                             [
-                                '启用测试模式继续使用（推荐）',
+                                '使用代理重试',
+                                '打开 CORS 解决方案',
                                 '检查网络连接',
                                 '尝试使用浏览器扩展解决CORS问题',
                                 '稍后重试'
@@ -1127,6 +1069,242 @@
             document.querySelector('[style*="position: fixed"]')?.remove();
         }
 
+        // —— 代理配置管理弹窗 ——
+        function showProxyManagerDialog() {
+            const cloneDeep = (x) => JSON.parse(JSON.stringify(x));
+            const initialList = (window.SmartCORSProxy?.getEffectiveProxies?.() || window.CORSProxyConfig?.proxies || []).map(p => ({
+                name: p.name || '',
+                url: p.url || p.base || '',
+                reliable: !!p.reliable,
+                rateLimit: p.rateLimit || '',
+                supportsMethods: Array.isArray(p.supportsMethods) ? p.supportsMethods.slice() : ['GET'],
+                supportsHeaders: p.supportsHeaders !== false
+            }));
+            let list = cloneDeep(initialList);
+
+            const overlay = document.createElement('div');
+            overlay.style.cssText = `position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 9999; display: flex; align-items: center; justify-content: center;`;
+
+            const dialog = document.createElement('div');
+            dialog.style.cssText = `background: var(--bg); color: var(--fg); border-radius: 14px; padding: 18px; width: 80vw; height: 80vh; overflow: auto; box-shadow: 0 25px 60px -12px rgba(0,0,0,.35);`;
+
+            const rowStyle = `display:grid;grid-template-columns:28px 1fr 2fr 120px 160px 140px 120px;gap:8px;align-items:center;padding:8px;border:1px solid var(--bd);border-radius:8px;background:var(--panel);`;
+
+            function render() {
+                dialog.innerHTML = `
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                        <h2 style="margin:0;">🌐 代理配置</h2>
+                        <button id="proxy-close" class="btn btn-ghost">✕</button>
+                    </div>
+                    <div style="color:var(--muted);font-size:13px;margin-bottom:10px;">
+                        配置公共/自建 CORS 代理，调整顺序即为尝试顺序。可运行自检以评估“连通性/转发头/POST”能力。
+                    </div>
+                    <div style="background: var(--panel); border: 1px solid var(--bd); border-radius: 8px; padding: 10px; margin-bottom: 10px; font-size: 12px; line-height: 1.6;">
+                        <strong>说明：</strong>
+                        <ul style="margin: 8px 0 0 18px; padding: 0;">
+                            <li><strong>可靠性</strong>：这是你对该代理的主观“可信度/稳定性”标记，用于排序与优先尝试；不代表实时可用性。</li>
+                            <li><strong>方法(GET/POST)</strong>：声明该代理理论上支持的请求方法。未勾选 POST 时，该代理不会被用于 POST 请求的候选。</li>
+                            <li><strong>转发自定义头</strong>：声明该代理理论上可转发如 Authorization 等自定义请求头。实际效果可能因浏览器预检而受限，请结合“🧪 自检”结果判定。</li>
+                        </ul>
+                        <div style="color: var(--muted); margin-top: 6px;">
+                            注：AllOrigins/ThingProxy 通常不转发自定义头；CORS Anywhere 可能需要先激活；自建/Vercel 函数代理一般可转发头且支持 POST。
+                        </div>
+                    </div>
+                    <div style="display:grid;grid-template-columns:28px 1fr 2fr 120px 160px 140px 120px;gap:8px;margin:6px 0 8px 0;color:var(--muted);font-size:12px;">
+                        <div>#</div>
+                        <div>名称</div>
+                        <div>基址</div>
+                        <div>可靠性</div>
+                        <div>方法(GET/POST)</div>
+                        <div>转发自定义头</div>
+                        <div>排序</div>
+                    </div>
+                    <div id="proxy-list" style="display:flex;flex-direction:column;gap:8px;"></div>
+                    <div style="display:flex;gap:8px;margin:10px 0 6px 0;">
+                        <button id="proxy-add" class="btn btn-secondary">➕ 添加代理</button>
+                        <button id="proxy-reset" class="btn btn-ghost">↩️ 重置为默认</button>
+                        <div style="margin-left:auto;display:flex;gap:8px;">
+                            <button id="proxy-save" class="btn btn-primary">💾 保存并重新检测</button>
+                            <button id="proxy-probe" class="btn btn-secondary">🧪 运行自检</button>
+                            <button id="proxy-toggle-json" class="btn btn-ghost">🧾 显示JSON</button>
+                            <button id="proxy-copy" class="btn btn-ghost">📋 复制结果</button>
+                        </div>
+                    </div>
+                    <div id="proxy-summary" style="display:none;margin:8px 0 6px 0;"></div>
+                    <div id="proxy-report" style="display:none;border:1px solid var(--bd);border-radius:10px;overflow:hidden;"></div>
+                    <pre id="proxy-result" style="display:none;background:#0b1220;color:#e5eefc;border-radius:10px;padding:12px;max-height:220px;overflow:auto;font-size:12px;">(无)</pre>
+                `;
+
+                const listEl = dialog.querySelector('#proxy-list');
+
+                listEl.innerHTML = '';
+                list.forEach((p, idx) => {
+                    const row = document.createElement('div');
+                    row.style.cssText = rowStyle;
+                    row.innerHTML = `
+                        <div style="text-align:center;color:var(--muted);">${idx + 1}</div>
+                        <input data-k="name" value="${p.name || ''}" placeholder="名称" style="padding:8px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--fg);"/>
+                        <input data-k="url" value="${p.url || ''}" placeholder="https://example.com/?url=" style="padding:8px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--fg);"/>
+                        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--fg);"><input data-k="reliable" type="checkbox" ${p.reliable ? 'checked' : ''}/> 可靠</label>
+                        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--fg);"><input data-k="mGET" type="checkbox" ${p.supportsMethods?.includes('GET') ? 'checked' : ''}/> GET <input data-k="mPOST" type="checkbox" style="margin-left:10px;" ${p.supportsMethods?.includes('POST') ? 'checked' : ''}/> POST</label>
+                        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--fg);"><input data-k="supportsHeaders" type="checkbox" ${p.supportsHeaders ? 'checked' : ''}/> 可转发头</label>
+                        <div style="display:flex;gap:6px;justify-content:flex-end;">
+                            <button class="btn btn-ghost btn-sm" data-action="up" title="上移">⬆️</button>
+                            <button class="btn btn-ghost btn-sm" data-action="down" title="下移">⬇️</button>
+                            <button class="btn btn-danger btn-sm" data-action="del" title="删除">🗑️</button>
+                        </div>
+                    `;
+
+                    // input bindings
+                    row.querySelectorAll('input').forEach(inp => {
+                        inp.onchange = (e) => {
+                            const k = inp.dataset.k;
+                            if (k === 'name') list[idx].name = inp.value;
+                            if (k === 'url') list[idx].url = inp.value;
+                            if (k === 'reliable') list[idx].reliable = inp.checked;
+                            if (k === 'supportsHeaders') list[idx].supportsHeaders = inp.checked;
+                            if (k === 'mGET' || k === 'mPOST') {
+                                const hasGet = row.querySelector('[data-k="mGET"]').checked;
+                                const hasPost = row.querySelector('[data-k="mPOST"]').checked;
+                                const methods = [];
+                                if (hasGet) methods.push('GET');
+                                if (hasPost) methods.push('POST');
+                                list[idx].supportsMethods = methods.length ? methods : ['GET'];
+                            }
+                        };
+                    });
+
+                    // actions
+                    row.querySelectorAll('button').forEach(btn => {
+                        btn.onclick = () => {
+                            const act = btn.dataset.action;
+                            if (act === 'up' && idx > 0) {
+                                [list[idx - 1], list[idx]] = [list[idx], list[idx - 1]];
+                                render();
+                            } else if (act === 'down' && idx < list.length - 1) {
+                                [list[idx + 1], list[idx]] = [list[idx], list[idx + 1]];
+                                render();
+                            } else if (act === 'del') {
+                                list.splice(idx, 1);
+                                render();
+                            }
+                        };
+                    });
+
+                    listEl.appendChild(row);
+                });
+
+                // toolbar buttons
+                dialog.querySelector('#proxy-close').onclick = () => overlay.remove();
+                dialog.querySelector('#proxy-add').onclick = () => { list.push({ name: '', url: '', reliable: false, rateLimit: '', supportsMethods: ['GET'], supportsHeaders: true }); render(); };
+                dialog.querySelector('#proxy-reset').onclick = async () => {
+                    try {
+                        window.SmartCORSProxy?.resetProxies?.();
+                        list = cloneDeep(window.SmartCORSProxy?.getEffectiveProxies?.() || window.CORSProxyConfig?.proxies || []);
+                        render();
+                        showToast('已重置为默认代理列表', 'success');
+                    } catch (e) {
+                        showToast('重置失败: ' + (e?.message || e), 'error');
+                    }
+                };
+                dialog.querySelector('#proxy-save').onclick = async () => {
+                    try {
+                        const sanitized = list.filter(p => (p.url || '').trim());
+                        window.SmartCORSProxy?.setUserProxies?.(sanitized);
+                        const ok = await window.SmartCORSProxy?.init?.();
+                        const st = window.SmartCORSProxy?.getStatus?.() || {};
+                        showToast(`代理列表已保存并检测：可用 ${st.workingCount || 0} 个，当前 ${st.currentProxy || 'None'}`, ok ? 'success' : 'warning');
+                    } catch (e) {
+                        showToast('保存失败: ' + (e?.message || e), 'error');
+                    }
+                };
+                dialog.querySelector('#proxy-probe').onclick = async () => {
+                    const btn = dialog.querySelector('#proxy-probe');
+                    const pre = dialog.querySelector('#proxy-result');
+                    btn.disabled = true; btn.textContent = '🧪 自检中...'; pre.textContent = '(运行中...)';
+                    try {
+                        const report = await window.SmartCORSProxy?.probeProxies?.({ proxies: list, timeoutMs: 8000 }) || [];
+                        pre.textContent = JSON.stringify(report, null, 2);
+                        // 可视化渲染
+                        const sumEl = dialog.querySelector('#proxy-summary');
+                        const repEl = dialog.querySelector('#proxy-report');
+                        const esc = (s) => String(s || '').replaceAll('<','&lt;').replaceAll('>','&gt;');
+                        const total = report.length;
+                        const reach = report.filter(r => r.simpleGet?.ok).length;
+                        const headers = report.filter(r => r.forwardedAuthorization).length;
+                        const posts = report.filter(r => r.postSupported).length;
+                        sumEl.innerHTML = `
+                            <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
+                                <span>总计: <strong>${total}</strong></span>
+                                <span>可达: <strong style="color:#16a34a">${reach}</strong></span>
+                                <span>转发头: <strong style="color:${headers>0?'#16a34a':'#64748b'}">${headers}</strong></span>
+                                <span>POST: <strong style="color:${posts>0?'#16a34a':'#dc2626'}">${posts}</strong></span>
+                            </div>`;
+                        const header = `
+                            <div style="display:grid;grid-template-columns:1.6fr 0.9fr 0.9fr 0.8fr 0.6fr 0.5fr 2fr;gap:0;border-bottom:1px solid var(--bd);background:var(--bg);color:var(--muted);font-size:12px;">
+                                <div style="padding:8px 10px;">代理</div>
+                                <div style="padding:8px 10px;">连通性</div>
+                                <div style="padding:8px 10px;">转发头</div>
+                                <div style="padding:8px 10px;">POST</div>
+                                <div style="padding:8px 10px;">延迟</div>
+                                <div style="padding:8px 10px;">HTTP</div>
+                                <div style="padding:8px 10px;">备注</div>
+                            </div>`;
+                        const yes = (t) => `<span style="background:#dcfce7;color:#166534;border:1px solid #bbf7d0;padding:2px 6px;border-radius:999px;font-size:12px;">✅ ${t}</span>`;
+                        const no = (t) => `<span style="background:#fee2e2;color:#991b1b;border:1px solid #fecaca;padding:2px 6px;border-radius:999px;font-size:12px;">❌ ${t}</span>`;
+                        const neutral = (t) => `<span style="background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;padding:2px 6px;border-radius:999px;font-size:12px;">— ${t}</span>`;
+                        const rows = report.map(r => {
+                            const reachOk = !!(r.simpleGet && r.simpleGet.ok);
+                            const status = (r.simpleGet && typeof r.simpleGet.status !== 'undefined') ? r.simpleGet.status : '-';
+                            const latency = (r.simpleGet && r.simpleGet.latencyMs) ? `${r.simpleGet.latencyMs}ms` : '-';
+                            const fwd = !!r.forwardedAuthorization;
+                            const post = !!r.postSupported;
+                            return `
+                                <div style="display:grid;grid-template-columns:1.6fr 0.9fr 0.9fr 0.8fr 0.6fr 0.5fr 2fr;gap:0;border-top:1px solid var(--bd);">
+                                    <div style="padding:10px;">
+                                        <div style="font-weight:600;">${esc(r.name)}</div>
+                                        <div style="color:var(--muted);font-size:12px;margin-top:2px;">${esc(r.base || '')}</div>
+                                    </div>
+                                    <div style="padding:10px;">${reachOk ? yes('可达') : no('失败')}</div>
+                                    <div style="padding:10px;">${fwd ? yes('已转发') : neutral('不保证')}</div>
+                                    <div style="padding:10px;">${post ? yes('支持') : no('不支持')}</div>
+                                    <div style="padding:10px;">${latency}</div>
+                                    <div style="padding:10px;">${status}</div>
+                                    <div style="padding:10px;color:var(--muted);font-size:12px;">${esc(r.notes || '')}</div>
+                                </div>`;
+                        }).join('');
+                        repEl.innerHTML = header + rows;
+                        sumEl.style.display = 'block';
+                        repEl.style.display = 'block';
+                        showToast('自检完成', 'success');
+                    } catch (e) {
+                        pre.textContent = '自检失败: ' + (e?.message || e);
+                        showToast('自检失败', 'error');
+                    } finally {
+                        btn.disabled = false; btn.textContent = '🧪 运行自检';
+                    }
+                };
+                // Toggle raw JSON visibility
+                dialog.querySelector('#proxy-toggle-json').onclick = () => {
+                    const pre = dialog.querySelector('#proxy-result');
+                    const btn = dialog.querySelector('#proxy-toggle-json');
+                    const showing = pre.style.display !== 'none';
+                    pre.style.display = showing ? 'none' : 'block';
+                    btn.textContent = showing ? '🧾 显示JSON' : '🧾 隐藏JSON';
+                };
+                dialog.querySelector('#proxy-copy').onclick = async () => {
+                    const pre = dialog.querySelector('#proxy-result');
+                    const text = pre?.textContent || '';
+                    try { await navigator.clipboard?.writeText(text); showToast('结果已复制', 'success'); } catch {}
+                };
+            }
+
+            render();
+            overlay.appendChild(dialog);
+            document.body.appendChild(overlay);
+            overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+        }
+
         // 现在给actions对象赋值
         actions.auth = function() {
             try {
@@ -1236,8 +1414,7 @@
 
             // 添加统计信息和操作按钮
             const stats = getCredentialStats(creds);
-            const testModeIndicator = CFG.TEST_MODE ?
-                '<span style="color: #f59e0b; font-size: 12px; margin-left: 10px;">⚠️ 测试模式</span>' : '';
+            const testModeIndicator = '';
 
             const statsHtml = `
                 <div style="display: flex; gap: 20px; margin-bottom: 20px; flex-wrap: wrap; align-items: center;">
@@ -1248,20 +1425,12 @@
                     ${testModeIndicator}
                     <div style="margin-left: auto;">
                         <button class="btn btn-primary" onclick="checkAllCredentials()" style="margin-right: 10px;">🔄 全部检测</button>
-                        <button class="btn btn-secondary" onclick="toggleTestMode()" style="margin-right: 10px;">${CFG.TEST_MODE ? '🔧 生产模式' : '🧪 测试模式'}</button>
                         <button class="btn btn-secondary" onclick="corsManager.recheckAPIs()" style="margin-right: 10px;">🔍 检测连接</button>
                         <button class="btn btn-secondary" onclick="window.NetworkStatusManager?.showDiagnostics()" style="margin-right: 10px;">🩺 网络诊断</button>
                         <button class="btn btn-secondary" onclick="actions.import()">📥 导入</button>
                         <button class="btn btn-secondary" onclick="actions.export()">📤 导出</button>
                     </div>
                 </div>
-                ${CFG.TEST_MODE ? `<div style="background: #fef3c7; color: #92400e; padding: 12px 16px; border-radius: 8px; font-size: 14px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between;">
-                    <div>
-                        <strong>🧪 测试模式</strong> - 使用模拟数据演示功能
-                        <div style="font-size: 12px; margin-top: 4px;">所有功能正常可用，数据仅供演示</div>
-                    </div>
-                    <button class="btn btn-secondary" onclick="corsManager.showCORSSolutions()" style="font-size: 12px; padding: 4px 8px;">解决CORS</button>
-                </div>` : ''}
             `;
 
             mainContent.innerHTML = statsHtml + cardsHtml;
@@ -1438,78 +1607,6 @@
             });
         }
 
-        // 切换测试模式
-        function toggleTestMode() {
-            CFG.TEST_MODE = !CFG.TEST_MODE;
-            localStorage.setItem('testMode', CFG.TEST_MODE.toString());
-
-            if (CFG.TEST_MODE) {
-                showToast('已开启测试模式 - 使用模拟数据', 'info');
-                // 如果没有凭证，添加一些示例数据
-                const creds = store.get();
-                if (creds.length === 0) {
-                    addSampleCredentials();
-                }
-            } else {
-                showToast('已切换到生产模式 - 将使用真实API', 'info');
-            }
-
-            showCredentialManagement(); // 刷新显示
-        }
-
-        // 添加示例凭证数据
-        function addSampleCredentials() {
-            const sampleCreds = [
-                {
-                    id: Date.now() + 1,
-                    email: 'demo@outlook.com',
-                    tenant: 'https://demo.augmentcode.com',
-                    token: 'demo_token_' + rand(16),
-                    subToken: 'sub_token_' + rand(16),
-                    status: 'ACTIVE',
-                    lastBalance: 25.5,
-                    lastIncluded: 100.0,
-                    lastEndDate: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString(),
-                    updatedAt: Date.now()
-                },
-                {
-                    id: Date.now() + 2,
-                    email: 'test@gmail.com',
-                    tenant: 'https://test.augmentcode.com',
-                    token: 'demo_token_' + rand(16),
-                    subToken: 'sub_token_' + rand(16),
-                    status: 'NO_BALANCE',
-                    lastBalance: 0,
-                    lastIncluded: 50.0,
-                    lastEndDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-                    updatedAt: Date.now()
-                },
-                {
-                    id: Date.now() + 3,
-                    email: 'expired@hotmail.com',
-                    tenant: 'https://expired.augmentcode.com',
-                    token: 'demo_token_' + rand(16),
-                    subToken: 'sub_token_' + rand(16),
-                    status: 'EXPIRED',
-                    lastBalance: 12.3,
-                    lastIncluded: 200.0,
-                    lastEndDate: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(),
-                    updatedAt: Date.now()
-                }
-            ];
-
-            store.set(sampleCreds);
-            showToast('已添加示例凭证数据', 'success');
-        }
-
-        // 从localStorage加载测试模式设置
-        function loadTestModeFromStorage() {
-            const saved = localStorage.getItem('testMode');
-            if (saved !== null) {
-                CFG.TEST_MODE = saved === 'true';
-            }
-        }
-
         // CORS检测和状态管理
         const corsManager = {
             async checkAPI(url, timeout = 5000) {
@@ -1550,11 +1647,9 @@
                     allOk
                 });
 
-                // 如果API不可用，自动启用测试模式
-                if (!allOk && !CFG.TEST_MODE) {
-                    console.log('检测到CORS问题，自动启用测试模式');
-                    CFG.TEST_MODE = true;
-                    localStorage.setItem('testMode', 'true');
+                // 如果API不可用，提示使用代理
+                if (!allOk) {
+                    console.log('检测到CORS问题，建议使用公共CORS代理');
                 }
 
                 this.updateStatusUI(allOk);
@@ -1566,18 +1661,20 @@
                 if (!statusDiv) return;
 
                 if (apiOk) {
-                    statusDiv.className = 'success';
+                    statusDiv.style.display = 'block';
+                    statusDiv.className = 'status-box success';
                     statusDiv.innerHTML = `
                         <h3>✅ API连接正常</h3>
                         <p>所有外部API都可以正常访问，功能完全可用。</p>
                     `;
                 } else {
-                    statusDiv.className = 'info';
+                    statusDiv.style.display = 'block';
+                    statusDiv.className = 'status-box info';
                     statusDiv.innerHTML = `
                         <h3>⚠️ 检测到CORS跨域问题</h3>
-                        <p>无法直接访问外部API，已自动启用<strong>测试模式</strong>。所有功能正常可用（使用模拟数据）。</p>
+                        <p>无法直接访问外部API。您可以点击“尝试代理”使用公共CORS代理，或查看“解决方案”。</p>
                         <div style="margin-top: 12px;">
-                            <strong>解决方案：</strong>
+                            <strong>操作：</strong>
                             <div style="margin: 8px 0; font-size: 14px;">
                                 <button class="btn btn-secondary" onclick="corsManager.tryProxy()" style="margin-right: 8px;">🔄 尝试代理</button>
                                 <button class="btn btn-secondary" onclick="corsManager.showCORSSolutions()" style="margin-right: 8px;">🛠️ 解决方案</button>
@@ -1605,8 +1702,6 @@
                             // 测试代理是否真的可用
                             try {
                                 await CFG.proxyManager.fetch('https://httpbin.org/json');
-                                CFG.TEST_MODE = false;
-                                localStorage.setItem('testMode', 'false');
                                 this.updateStatusUI(true);
                                 return;
                             } catch (testError) {
@@ -1615,10 +1710,10 @@
                         }
                     }
 
-                    showToast('❌ 没有找到可用的代理，继续使用测试模式', 'info');
+                    showToast('❌ 没有找到可用的代理，请稍后重试或查看CORS解决方案', 'info');
                 } catch (error) {
                     console.error('代理初始化失败:', error);
-                    showToast('代理初始化失败，继续使用测试模式', 'error');
+                    showToast('代理初始化失败', 'error');
                 }
             },
 
@@ -1642,25 +1737,28 @@
                         <button id="close-solutions" class="btn btn-ghost">✕</button>
                     </div>
                     <div style="color: var(--fg); line-height: 1.6;">
-                        <h4>方案1：浏览器扩展（推荐）</h4>
+                        <h4>方案1：使用公共CORS代理</h4>
+                        <p>系统已内置并优先使用以下公共CORS代理：</p>
+                        <ul>
+                            <li><a href="https://api.allorigins.win/" target="_blank">AllOrigins</a> — https://api.allorigins.win/raw?url=</li>
+                            <li><a href="https://corsproxy.io/" target="_blank">corsproxy.io</a> — https://corsproxy.io/?</li>
+                            <li><a href="https://thingproxy.freeboard.io/" target="_blank">ThingProxy</a> — https://thingproxy.freeboard.io/fetch/</li>
+                            <li><a href="https://vercel.com/" target="_blank">Proxy CORS (Vercel)</a> — https://proxy-cors.vercel.app/api/proxy?url=</li>
+                        </ul>
+
+                        <h4>方案2：浏览器扩展</h4>
+                        <p>您也可以使用浏览器扩展来解决跨域问题。以下是一些可用的扩展：</p>
                         <ul>
                             <li>Chrome: 安装 "CORS Unblock" 或 "Disable CORS" 扩展</li>
                             <li>Firefox: 安装 "CORS Everywhere" 扩展</li>
                             <li>Edge: 安装 "CORS Helper" 扩展</li>
                         </ul>
 
-                        <h4>方案2：Chrome启动参数</h4>
-                        <p>关闭Chrome，然后用以下命令启动：</p>
-                        <code style="background: var(--panel); padding: 8px; border-radius: 4px; display: block; margin: 8px 0;">
-                            chrome.exe --disable-web-security --user-data-dir="C:/temp/chrome_dev"
-                        </code>
-
-                        <h4>方案3：继续使用测试模式</h4>
-                        <p>当前已启用测试模式，所有功能都可正常使用（使用模拟数据进行演示）。</p>
-
-                        <div style="margin-top: 20px; padding: 12px; background: var(--panel); border-radius: 8px;">
-                            <strong>💡 提示：</strong> 解决CORS问题后，点击"重新检测"按钮即可切换到真实API模式。
-                        </div>
+                        <h4>方案3：修改浏览器配置</h4>
+                        <p>您也可以修改浏览器配置来解决跨域问题。以下是一些可用的配置：</p>
+                        <ul>
+                            <li>Chrome: 启动 Chrome 时添加参数 "--disable-web-security --user-data-dir"</li>
+                        </ul>
                     </div>
                 `;
 
@@ -1683,24 +1781,18 @@
                 const apiOk = await this.checkAllAPIs();
                 if (apiOk) {
                     showToast('API连接恢复正常！', 'success');
-                    CFG.TEST_MODE = false;
-                    localStorage.setItem('testMode', 'false');
                     showCredentialManagement(); // 刷新界面
                 } else {
-                    showToast('API仍然不可用，继续使用测试模式', 'info');
+                    showToast('API仍然不可用，建议尝试代理或查看解决方案', 'info');
                 }
             }
         };
-        
+
         // 页面初始化
         document.addEventListener('DOMContentLoaded', async function() {
             console.log('页面开始初始化...');
 
             try {
-                // 加载测试模式设置
-                loadTestModeFromStorage();
-                console.log('测试模式:', CFG.TEST_MODE);
-
                 // 测试基础函数
                 console.log('测试$函数:', typeof $ === 'function');
                 console.log('测试store对象:', typeof store === 'object');
@@ -1709,64 +1801,7 @@
                 // 检测API连接状态
                 await corsManager.checkAllAPIs();
 
-                // 初始化测试数据（如果没有数据的话）
-                let creds = store.get();
-                if (creds.length === 0) {
-                    const testCreds = [
-                        {
-                            id: Date.now() + 1,
-                            email: 'MartinDana3025@outlook.com',
-                            tenant: 'https://d4.api.augmentcode.com/',
-                            token: '7626fd13cec564c2f5222f5de7538bd651cc3fd1f26dcda17141580418c190fb',
-                            subToken: 'IlN4bVRMRFVScG55emJETjMi.OirKwyZ8PNXu4_WkiN8_ZuryrWk',
-                            lastBalance: '50.00',
-                            lastIncluded: '50.00',
-                            lastEndDate: '2025-08-31T12:19:44+00:00',
-                            status: 'ACTIVE',
-                            updatedAt: Date.now()
-                        },
-                        {
-                            id: Date.now() + 2,
-                            email: 'nanno502@outlook.com',
-                            tenant: 'https://d1.api.augmentcode.com/',
-                            token: '966f6fba318e1c873934bbbecbf7ab433725e8248322365ec39ab3896b7df91f',
-                            subToken: 'IkZIdDdqSE1KYlg4UGdhOGIi.5VkUByDnl66K_uMfaIZvgZ_lNhc',
-                            lastBalance: '50.00',
-                            lastIncluded: '50.00',
-                            lastEndDate: '2025-08-31T12:48:21+00:00',
-                            status: 'ACTIVE',
-                            updatedAt: Date.now()
-                        },
-                        {
-                            id: Date.now() + 3,
-                            email: 'a5@nanno.qzz.io',
-                            tenant: 'https://d11.api.augmentcode.com/',
-                            token: '1111b4e96be9c13110e8ac3384afa843c62fe7c74c691b0030b0090923e14e1d',
-                            subToken: 'IldYUm9CZDVnY3A2RnZQZmEi.6ACnr-1e8Jlcr1yuDfESsyY1d4E',
-                            lastBalance: '',
-                            lastIncluded: '',
-                            lastEndDate: '',
-                            status: 'EXPIRED',
-                            updatedAt: Date.now()
-                        },
-                        {
-                            id: Date.now() + 4,
-                            email: 'gzzd1qh7@isco.eu.org',
-                            tenant: 'https://d8.api.augmentcode.com/',
-                            token: '69d0b5394367931da3ad6fda2c0614eb8c363be0499b31ce1cb2116187129bdf',
-                            subToken: 'IkJtaEE4UjNQVG5hUWYzdU4i.5A-Qe1Fcsd6EVeMSPaaFUk0ZrF0',
-                            lastBalance: '0.00',
-                            lastIncluded: '50.00',
-                            lastEndDate: '2025-09-06T17:05:51+00:00',
-                            status: 'NO_BALANCE',
-                            updatedAt: Date.now()
-                        }
-                    ];
-                    store.set(testCreds);
-                    console.log('初始化测试数据完成');
-                } else {
-                    console.log('已有数据，跳过初始化');
-                }
+                // 不注入测试数据
 
                 // 绑定事件
                 const navAuth = $('#nav-auth');
@@ -1790,6 +1825,11 @@
                 if (navExport) {
                     navExport.onclick = actions.export;
                     console.log('导出数据按钮绑定完成');
+                }
+                const navProxy = $('#nav-proxy');
+                if (navProxy) {
+                    navProxy.onclick = showProxyManagerDialog;
+                    console.log('代理配置按钮绑定完成');
                 }
 
                 // 隐藏加载，显示就绪状态，并直接显示凭证管理界面
