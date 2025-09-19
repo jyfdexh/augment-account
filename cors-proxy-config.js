@@ -7,14 +7,14 @@ window.CORSProxyConfig = {
     // 公共代理服务列表（按可靠性排序）
     proxies: [
         {
-            name: 'AllOrigins',
-            url: 'https://api.allorigins.win/raw?url=',
+            name: 'nanno',
+            url: 'https://cors-proxy.jyf.workers.dev/proxy?url=',
             type: 'simple',
             reliable: true,
             rateLimit: '1000/hour',
-            // AllOrigins 原生不转发自定义头，且不处理复杂预检
-            supportsMethods: ['GET'],
-            supportsHeaders: false
+            // Workers 代理，支持完整的 CORS 功能
+            supportsMethods: ['GET', 'POST'],
+            supportsHeaders: true
         },
         {
             name: 'CorsProxy.io',
@@ -25,6 +25,16 @@ window.CORSProxyConfig = {
             // 支持 GET，部分情况下可转发头部
             supportsMethods: ['GET'],
             supportsHeaders: true
+        },
+        {
+            name: 'AllOrigins',
+            url: 'https://api.allorigins.win/raw?url=',
+            type: 'simple',
+            reliable: true,
+            rateLimit: '1000/hour',
+            // AllOrigins 原生不转发自定义头，且不处理复杂预检
+            supportsMethods: ['GET'],
+            supportsHeaders: false
         },
         {
             name: 'Proxy CORS',
@@ -269,6 +279,7 @@ window.SmartCORSProxy = {
         const name = (p?.name || '').trim();
         const base = p?.url || p?.base || '';
         const enc = encodeURIComponent(target);
+        if (name.startsWith('nanno')) return base + enc; // Workers 代理使用 URL 编码
         if (name.startsWith('AllOrigins')) return base + enc;
         if (name.startsWith('CorsProxy.io')) return base + target; // 支持 "?<full-url>"
         if (name.startsWith('Proxy CORS')) return base + enc; // vercel 函数
