@@ -11,3 +11,4 @@
 - 按钮流光高光（hover 时流动高光带）
 - 标题轻量故障动画（.glitch）
 - 主题切换时自动 start/stop 效果并释放监听器
+- 为每个账号凭证框添加详情按钮，弹出显示完整凭证信息（id/email/tenant/token/subToken），其中subToken需要加上https://portal.withorb.com/view?token=前缀并可点击跳转

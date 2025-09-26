@@ -289,6 +289,7 @@
         <button id="nav-checkall" class="btn btn-ghost">🔄 全部检测</button>
         <button id="nav-import" class="btn btn-ghost">📥 导入数据</button>
         <button id="nav-export" class="btn btn-ghost">📤 导出数据</button>
+        <button id="nav-sync" class="btn btn-ghost">☁️ 云同步</button>
         <button id="nav-proxy" class="btn btn-ghost">🌐 代理配置</button>
         <button id="nav-theme" class="btn btn-secondary" aria-label="切换主题">🌙</button>
     </div>
@@ -343,6 +344,119 @@
                     return true;
                 } catch {
                     return false;
+                }
+            }
+        };
+        
+        // GitHub Gist 同步管理
+        const gistSync = {
+            getConfig: () => {
+                try {
+                    const config = localStorage.getItem('gist_sync_config');
+                    return config ? JSON.parse(config) : { token: '', gistId: '', autoSync: false };
+                } catch {
+                    return { token: '', gistId: '', autoSync: false };
+                }
+            },
+            
+            setConfig: (config) => {
+                try {
+                    localStorage.setItem('gist_sync_config', JSON.stringify(config));
+                    return true;
+                } catch {
+                    return false;
+                }
+            },
+            
+            async upload(data, token, gistId = null) {
+                const url = gistId 
+                    ? `https://api.github.com/gists/${gistId}`
+                    : 'https://api.github.com/gists';
+                
+                const response = await fetch(url, {
+                    method: gistId ? 'PATCH' : 'POST',
+                    headers: {
+                        'Authorization': `token ${token}`,
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/vnd.github.v3+json'
+                    },
+                    body: JSON.stringify({
+                        description: 'Augment Account Credentials - Auto Sync',
+                        public: false,
+                        files: {
+                            'augment-creds.json': {
+                                content: JSON.stringify({
+                                    data: data,
+                                    lastSync: new Date().toISOString(),
+                                    version: '1.0'
+                                }, null, 2)
+                            }
+                        }
+                    })
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(`GitHub API错误: ${error.message || response.statusText}`);
+                }
+                
+                return response.json();
+            },
+            
+            async download(token, gistId) {
+                const response = await fetch(`https://api.github.com/gists/${gistId}`, {
+                    headers: {
+                        'Authorization': `token ${token}`,
+                        'Accept': 'application/vnd.github.v3+json'
+                    }
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(`GitHub API错误: ${error.message || response.statusText}`);
+                }
+                
+                const gist = await response.json();
+                const file = gist.files['augment-creds.json'];
+                
+                if (!file) {
+                    throw new Error('Gist中未找到凭证文件');
+                }
+                
+                const content = JSON.parse(file.content);
+                return {
+                    data: content.data || [],
+                    lastSync: content.lastSync,
+                    version: content.version
+                };
+            },
+            
+            async sync(direction = 'upload') {
+                const config = this.getConfig();
+                if (!config.token) {
+                    throw new Error('请先配置 GitHub Token');
+                }
+                
+                if (direction === 'upload') {
+                    const localData = store.get();
+                    const result = await this.upload(localData, config.token, config.gistId);
+                    
+                    // 保存 Gist ID（首次上传时）
+                    if (!config.gistId) {
+                        config.gistId = result.id;
+                        this.setConfig(config);
+                    }
+                    
+                    return { direction: 'upload', count: localData.length, gistId: result.id };
+                } else {
+                    if (!config.gistId) {
+                        throw new Error('请先配置 Gist ID 或进行首次上传');
+                    }
+                    
+                    const cloudData = await this.download(config.token, config.gistId);
+                    store.set(cloudData.data);
+                    
+                    return { direction: 'download', count: cloudData.data.length, lastSync: cloudData.lastSync };
                 }
             }
         };
@@ -985,6 +1099,452 @@
                 showManageDialog();
             }
         };
+        
+        // 云同步配置对话框
+        function showSyncDialog() {
+            const config = gistSync.getConfig();
+            
+            const overlay = document.createElement('div');
+            overlay.style.cssText = `
+                position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 9999;
+                display: flex; align-items: center; justify-content: center;
+            `;
+
+            const dialog = document.createElement('div');
+            dialog.style.cssText = `
+                background: var(--bg); border-radius: 12px; padding: 20px;
+                max-width: 600px; width: 90vw; max-height: 80vh; overflow-y: auto;
+                box-shadow: 0 25px 60px -12px rgba(0,0,0,.28);
+            `;
+
+            dialog.innerHTML = `
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                    <h2 style="margin: 0; color: var(--fg);">☁️ GitHub Gist 云同步</h2>
+                    <button id="close-sync" class="btn btn-ghost">✕</button>
+                </div>
+                
+                <div style="background: var(--panel); border: 1px solid var(--bd); border-radius: 8px; padding: 15px; margin-bottom: 20px;">
+                    <h4 style="margin: 0 0 10px 0; color: var(--fg);">📋 配置步骤</h4>
+                    <ol style="margin: 0; padding-left: 20px; color: var(--muted); font-size: 14px; line-height: 1.6;">
+                        <li>访问 <a href="https://github.com/settings/tokens" target="_blank" style="color: #3b82f6;">GitHub Settings → Personal access tokens</a></li>
+                        <li>点击 "Generate new token (classic)"</li>
+                        <li>权限只需勾选 <strong>gist</strong> 即可</li>
+                        <li>复制生成的 Token 并粘贴到下方</li>
+                        <li><strong>获取 Gist ID 的两种方式：</strong>
+                            <ul style="margin: 5px 0; padding-left: 15px;">
+                                <li><strong>自动获取：</strong>首次使用点击"上传到云端"，系统会自动生成 Gist ID</li>
+                                <li><strong>手动获取：</strong>访问 <a href="https://gist.github.com/" target="_blank" style="color: #3b82f6;">GitHub Gist</a>，找到您的凭证文件，URL中的字符串就是 Gist ID<br>
+                                    <span style="font-family: monospace; background: var(--chip); padding: 2px 4px; border-radius: 3px; font-size: 12px;">
+                                        https://gist.github.com/username/<strong style="color: #dc2626;">abc123def456</strong> ← 这部分就是 Gist ID
+                                    </span>
+                                </li>
+                            </ul>
+                        </li>
+                        <li>其他设备输入相同的 Token 和 Gist ID 即可同步数据</li>
+                    </ol>
+                </div>
+                
+                <div style="display: grid; grid-template-columns: 120px 1fr; gap: 15px; align-items: center; margin-bottom: 20px;">
+                    <label style="color: var(--fg); font-weight: 500;">GitHub Token:</label>
+                    <input id="sync-token" type="password" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" value="${config.token}" style="
+                        width: 100%; padding: 8px 12px; border: 1px solid var(--bd);
+                        border-radius: 8px; background: var(--bg); color: var(--fg);
+                        font-family: ui-monospace, monospace; font-size: 12px;
+                    " />
+                    
+                    <label style="color: var(--fg); font-weight: 500;">Gist ID:</label>
+                    <input id="sync-gist-id" placeholder="自动生成或手动输入" value="${config.gistId}" style="
+                        width: 100%; padding: 8px 12px; border: 1px solid var(--bd);
+                        border-radius: 8px; background: var(--bg); color: var(--fg);
+                        font-family: ui-monospace, monospace; font-size: 12px;
+                    " />
+                    
+                    <label style="color: var(--fg); font-weight: 500;">自动同步:</label>
+                    <label style="display: flex; align-items: center; gap: 8px; color: var(--muted);">
+                        <input id="sync-auto" type="checkbox" ${config.autoSync ? 'checked' : ''} />
+                        数据变更时自动上传到云端
+                    </label>
+                </div>
+                
+                <div style="display: flex; gap: 10px; justify-content: center; margin-bottom: 15px;">
+                    <button id="sync-upload" class="btn btn-primary">⬆️ 上传到云端</button>
+                    <button id="sync-preview" class="btn btn-secondary">👁️ 预览云端数据</button>
+                    <button id="sync-download" class="btn btn-secondary">⬇️ 从云端下载</button>
+                    <button id="sync-test" class="btn btn-ghost">🧪 测试连接</button>
+                </div>
+                
+                <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                    <button id="sync-save" class="btn btn-primary">💾 保存配置</button>
+                    <button id="sync-clear" class="btn btn-danger">🗑️ 清除配置</button>
+                </div>
+                
+                <div id="sync-status" style="margin-top: 15px; padding: 10px; border-radius: 8px; display: none;"></div>
+            `;
+
+            overlay.appendChild(dialog);
+            document.body.appendChild(overlay);
+            
+            const showStatus = (message, type = 'info') => {
+                const statusDiv = $('#sync-status');
+                const colors = {
+                    success: { bg: '#dcfce7', text: '#166534', border: '#16a34a' },
+                    error: { bg: '#fee2e2', text: '#991b1b', border: '#dc2626' },
+                    info: { bg: '#dbeafe', text: '#1e40af', border: '#3b82f6' }
+                };
+                const color = colors[type] || colors.info;
+                
+                statusDiv.style.display = 'block';
+                statusDiv.style.background = color.bg;
+                statusDiv.style.color = color.text;
+                statusDiv.style.border = `1px solid ${color.border}`;
+                statusDiv.textContent = message;
+            };
+
+            // 绑定事件
+            $('#close-sync').onclick = () => overlay.remove();
+            
+            $('#sync-save').onclick = () => {
+                const newConfig = {
+                    token: $('#sync-token').value.trim(),
+                    gistId: $('#sync-gist-id').value.trim(),
+                    autoSync: $('#sync-auto').checked
+                };
+                
+                if (gistSync.setConfig(newConfig)) {
+                    showToast('配置已保存', 'success');
+                    showStatus('配置已保存到本地', 'success');
+                } else {
+                    showStatus('保存配置失败', 'error');
+                }
+            };
+            
+            $('#sync-clear').onclick = () => {
+                if (confirm('确定要清除所有同步配置吗？')) {
+                    gistSync.setConfig({ token: '', gistId: '', autoSync: false });
+                    $('#sync-token').value = '';
+                    $('#sync-gist-id').value = '';
+                    $('#sync-auto').checked = false;
+                    showStatus('配置已清除', 'success');
+                }
+            };
+            
+            $('#sync-test').onclick = async () => {
+                const token = $('#sync-token').value.trim();
+                if (!token) {
+                    showStatus('请先输入 GitHub Token', 'error');
+                    return;
+                }
+                
+                showStatus('正在测试连接...', 'info');
+                
+                try {
+                    const response = await fetch('https://api.github.com/user', {
+                        headers: {
+                            'Authorization': `token ${token}`,
+                            'Accept': 'application/vnd.github.v3+json'
+                        }
+                    });
+                    
+                    if (response.ok) {
+                        const user = await response.json();
+                        showStatus(`✅ 连接成功！当前用户: ${user.login}`, 'success');
+                    } else {
+                        showStatus('❌ Token 无效或权限不足', 'error');
+                    }
+                } catch (error) {
+                    showStatus(`❌ 连接失败: ${error.message}`, 'error');
+                }
+            };
+            
+            $('#sync-upload').onclick = async () => {
+                const token = $('#sync-token').value.trim();
+                if (!token) {
+                    showStatus('请先输入 GitHub Token', 'error');
+                    return;
+                }
+                
+                showStatus('正在上传到云端...', 'info');
+                
+                try {
+                    // 先保存配置
+                    const newConfig = {
+                        token: token,
+                        gistId: $('#sync-gist-id').value.trim(),
+                        autoSync: $('#sync-auto').checked
+                    };
+                    gistSync.setConfig(newConfig);
+                    
+                    const result = await gistSync.sync('upload');
+                    $('#sync-gist-id').value = result.gistId;
+                    
+                    showStatus(`✅ 上传成功！已同步 ${result.count} 个凭证`, 'success');
+                    showToast(`云端同步成功：${result.count} 个凭证`, 'success');
+                } catch (error) {
+                    showStatus(`❌ 上传失败: ${error.message}`, 'error');
+                    showToast('云端上传失败: ' + error.message, 'error');
+                }
+            };
+            
+            $('#sync-preview').onclick = async () => {
+                const token = $('#sync-token').value.trim();
+                const gistId = $('#sync-gist-id').value.trim();
+                
+                if (!token || !gistId) {
+                    showStatus('请先输入 GitHub Token 和 Gist ID', 'error');
+                    return;
+                }
+                
+                showStatus('正在获取云端数据...', 'info');
+                
+                try {
+                    const cloudData = await gistSync.download(token, gistId);
+                    overlay.remove();
+                    showCloudDataPreview(cloudData);
+                } catch (error) {
+                    showStatus(`❌ 获取失败: ${error.message}`, 'error');
+                }
+            };
+            
+            $('#sync-download').onclick = async () => {
+                const token = $('#sync-token').value.trim();
+                const gistId = $('#sync-gist-id').value.trim();
+                
+                if (!token || !gistId) {
+                    showStatus('请先输入 GitHub Token 和 Gist ID', 'error');
+                    return;
+                }
+                
+                if (!confirm('下载将覆盖本地数据，确定继续吗？')) {
+                    return;
+                }
+                
+                showStatus('正在从云端下载...', 'info');
+                
+                try {
+                    // 先保存配置
+                    const newConfig = {
+                        token: token,
+                        gistId: gistId,
+                        autoSync: $('#sync-auto').checked
+                    };
+                    gistSync.setConfig(newConfig);
+                    
+                    const result = await gistSync.sync('download');
+                    
+                    showStatus(`✅ 下载成功！已同步 ${result.count} 个凭证`, 'success');
+                    showToast(`云端下载成功：${result.count} 个凭证`, 'success');
+                    
+                    // 刷新主界面
+                    setTimeout(() => {
+                        overlay.remove();
+                        showCredentialManagement();
+                    }, 1500);
+                } catch (error) {
+                    showStatus(`❌ 下载失败: ${error.message}`, 'error');
+                    showToast('云端下载失败: ' + error.message, 'error');
+                }
+            };
+
+            overlay.onclick = (e) => {
+                if (e.target === overlay) overlay.remove();
+            };
+        }
+        
+        // 云端数据预览对话框
+        function showCloudDataPreview(cloudData) {
+            const { data, lastSync, version } = cloudData;
+            const localData = store.get();
+            
+            // 统计信息
+            const cloudStats = getCredentialStats(data);
+            const localStats = getCredentialStats(localData);
+            
+            // 按状态分组
+            const groupByStatus = (creds) => {
+                const groups = {};
+                creds.forEach(cred => {
+                    const status = cred.status || 'UNKNOWN';
+                    if (!groups[status]) groups[status] = [];
+                    groups[status].push(cred);
+                });
+                return groups;
+            };
+            
+            const cloudGroups = groupByStatus(data);
+            const localGroups = groupByStatus(localData);
+            
+            const overlay = document.createElement('div');
+            overlay.style.cssText = `
+                position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 9999;
+                display: flex; align-items: center; justify-content: center;
+            `;
+
+            const dialog = document.createElement('div');
+            dialog.style.cssText = `
+                background: var(--bg); border-radius: 12px; padding: 20px;
+                max-width: 900px; width: 95vw; max-height: 85vh; overflow-y: auto;
+                box-shadow: 0 25px 60px -12px rgba(0,0,0,.28);
+            `;
+
+            // 生成状态对比表格
+            const statusComparison = Object.keys({...cloudGroups, ...localGroups}).map(status => {
+                const cloudCount = cloudGroups[status]?.length || 0;
+                const localCount = localGroups[status]?.length || 0;
+                const statusText = getStatusText(status);
+                const statusColor = getStatusColor(status);
+                
+                return `
+                    <tr style="border-bottom: 1px solid var(--bd);">
+                        <td style="padding: 8px; color: ${statusColor.text}; font-weight: 500;">${statusText}</td>
+                        <td style="padding: 8px; text-align: center; color: var(--fg);">${localCount}</td>
+                        <td style="padding: 8px; text-align: center; color: var(--fg);">${cloudCount}</td>
+                        <td style="padding: 8px; text-align: center; color: ${cloudCount > localCount ? '#16a34a' : cloudCount < localCount ? '#dc2626' : 'var(--muted)'};">
+                            ${cloudCount > localCount ? '+' + (cloudCount - localCount) : cloudCount < localCount ? (cloudCount - localCount) : '='}
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+            
+            // 生成云端凭证列表预览
+            const credentialPreview = data.slice(0, 10).map((cred, index) => {
+                const statusColor = getStatusColor(cred.status);
+                return `
+                    <div style="
+                        display: flex; justify-content: space-between; align-items: center;
+                        padding: 8px 12px; margin: 4px 0; border-radius: 6px;
+                        background: ${statusColor.bg}; border: 1px solid ${statusColor.border};
+                    ">
+                        <div>
+                            <strong style="color: ${statusColor.text};">${cred.email || '未知邮箱'}</strong>
+                            <div style="font-size: 11px; color: var(--muted);">
+                                ID: ${cred.id} | 更新: ${cred.updatedAt ? new Date(cred.updatedAt).toLocaleString() : '未知'}
+                            </div>
+                        </div>
+                        <span style="
+                            background: ${statusColor.text}; color: white;
+                            padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold;
+                        ">${getStatusText(cred.status)}</span>
+                    </div>
+                `;
+            }).join('');
+
+            dialog.innerHTML = `
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                    <h2 style="margin: 0; color: var(--fg);">👁️ 云端数据预览</h2>
+                    <button id="close-preview" class="btn btn-ghost">✕</button>
+                </div>
+                
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+                    <!-- 同步信息 -->
+                    <div style="background: var(--panel); border: 1px solid var(--bd); border-radius: 8px; padding: 15px;">
+                        <h4 style="margin: 0 0 10px 0; color: var(--fg);">📊 同步信息</h4>
+                        <div style="color: var(--muted); font-size: 14px; line-height: 1.6;">
+                            <div><strong>最后同步:</strong> ${lastSync ? new Date(lastSync).toLocaleString() : '未知'}</div>
+                            <div><strong>数据版本:</strong> ${version || '1.0'}</div>
+                            <div><strong>云端凭证数:</strong> ${data.length}</div>
+                            <div><strong>本地凭证数:</strong> ${localData.length}</div>
+                        </div>
+                    </div>
+                    
+                    <!-- 状态对比 -->
+                    <div style="background: var(--panel); border: 1px solid var(--bd); border-radius: 8px; padding: 15px;">
+                        <h4 style="margin: 0 0 10px 0; color: var(--fg);">📈 状态对比</h4>
+                        <table style="width: 100%; font-size: 12px; border-collapse: collapse;">
+                            <thead>
+                                <tr style="background: var(--chip); color: var(--muted);">
+                                    <th style="padding: 6px; text-align: left;">状态</th>
+                                    <th style="padding: 6px; text-align: center;">本地</th>
+                                    <th style="padding: 6px; text-align: center;">云端</th>
+                                    <th style="padding: 6px; text-align: center;">差异</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${statusComparison}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                
+                <!-- 云端凭证预览 -->
+                <div style="background: var(--panel); border: 1px solid var(--bd); border-radius: 8px; padding: 15px; margin-bottom: 20px;">
+                    <h4 style="margin: 0 0 10px 0; color: var(--fg);">📋 云端凭证预览 ${data.length > 10 ? `(显示前10个，共${data.length}个)` : `(共${data.length}个)`}</h4>
+                    <div style="max-height: 300px; overflow-y: auto;">
+                        ${data.length > 0 ? credentialPreview : '<div style="text-align: center; color: var(--muted); padding: 20px;">云端暂无凭证数据</div>'}
+                    </div>
+                </div>
+                
+                <!-- 操作按钮 -->
+                <div style="display: flex; gap: 10px; justify-content: center;">
+                    <button id="preview-download" class="btn btn-primary">⬇️ 确认下载并覆盖本地</button>
+                    <button id="preview-merge" class="btn btn-secondary">🔄 智能合并（推荐）</button>
+                    <button id="preview-cancel" class="btn btn-ghost">❌ 取消</button>
+                </div>
+                
+                <div style="background: var(--chip); border-radius: 6px; padding: 10px; margin-top: 15px; font-size: 12px; color: var(--muted);">
+                    <strong>💡 操作说明：</strong><br>
+                    • <strong>确认下载：</strong>完全覆盖本地数据，适用于全新设备或完全同步<br>
+                    • <strong>智能合并：</strong>保留本地数据，仅添加云端新增的凭证，避免数据丢失<br>
+                    • <strong>取消：</strong>关闭预览，不进行任何操作
+                </div>
+            `;
+
+            overlay.appendChild(dialog);
+            document.body.appendChild(overlay);
+
+            // 绑定事件
+            $('#close-preview').onclick = () => overlay.remove();
+            $('#preview-cancel').onclick = () => overlay.remove();
+            
+            $('#preview-download').onclick = async () => {
+                if (confirm(`确定要用云端的 ${data.length} 个凭证完全覆盖本地的 ${localData.length} 个凭证吗？此操作不可撤销！`)) {
+                    try {
+                        store.set(data);
+                        showToast(`✅ 下载完成！已同步 ${data.length} 个凭证`, 'success');
+                        overlay.remove();
+                        showCredentialManagement();
+                    } catch (error) {
+                        showToast('❌ 下载失败: ' + error.message, 'error');
+                    }
+                }
+            };
+            
+            $('#preview-merge').onclick = async () => {
+                try {
+                    // 智能合并：以ID为准，云端数据优先，但保留本地独有的数据
+                    const mergedData = [...localData];
+                    const localIds = new Set(localData.map(c => c.id));
+                    
+                    let addedCount = 0;
+                    let updatedCount = 0;
+                    
+                    data.forEach(cloudCred => {
+                        const existingIndex = mergedData.findIndex(c => c.id === cloudCred.id);
+                        if (existingIndex >= 0) {
+                            // 更新现有凭证（云端数据更新时间更新则覆盖）
+                            if ((cloudCred.updatedAt || 0) >= (mergedData[existingIndex].updatedAt || 0)) {
+                                mergedData[existingIndex] = cloudCred;
+                                updatedCount++;
+                            }
+                        } else {
+                            // 添加新凭证
+                            mergedData.push(cloudCred);
+                            addedCount++;
+                        }
+                    });
+                    
+                    store.set(mergedData);
+                    showToast(`✅ 智能合并完成！新增 ${addedCount} 个，更新 ${updatedCount} 个凭证`, 'success');
+                    overlay.remove();
+                    showCredentialManagement();
+                } catch (error) {
+                    showToast('❌ 合并失败: ' + error.message, 'error');
+                }
+            };
+
+            overlay.onclick = (e) => {
+                if (e.target === overlay) overlay.remove();
+            };
+        }
 
         // 先声明actions对象，稍后赋值
         const actions = {};
@@ -1690,21 +2250,35 @@
             const displayStyle = isExpanded ? 'block' : 'none';
             const arrowIcon = isExpanded ? '▼' : '▶';
 
+            // AURA-X协议：为失效凭证和其他凭证添加清空按钮
+            const showClearButton = sectionId === 'invalid' || sectionId === 'other';
+            const clearButtonHtml = showClearButton ? `
+                <button class="btn btn-danger btn-sm"
+                        onclick="clearCredentialSection('${sectionId}', '${title}')"
+                        style="margin-left: 8px; font-size: 11px; padding: 4px 8px;"
+                        title="清空${title}下的所有账号">
+                    🗑️ 清空
+                </button>
+            ` : '';
+
             let cardsHtml = `
                 <div class="credential-section ${expandedClass}" style="margin-bottom: 20px;">
-                    <div class="section-header" onclick="toggleCredentialSection('${sectionId}')" style="
+                    <div class="section-header" style="
                         display: flex; align-items: center; justify-content: space-between;
                         background: var(--panel); border: 1px solid var(--bd); border-radius: 8px;
-                        padding: 12px 16px; cursor: pointer; user-select: none;
+                        padding: 12px 16px; user-select: none;
                         transition: all 0.2s ease;
                     ">
-                        <div style="display: flex; align-items: center; gap: 8px;">
+                        <div style="display: flex; align-items: center; gap: 8px; cursor: pointer;" onclick="toggleCredentialSection('${sectionId}')">
                             <span class="arrow-icon" style="font-size: 12px; transition: transform 0.2s ease;">${arrowIcon}</span>
                             <h3 style="margin: 0; font-size: 16px; font-weight: 600;">${title}</h3>
                             <span style="
                                 background: var(--chip); color: var(--muted);
                                 padding: 2px 8px; border-radius: 12px; font-size: 12px;
                             ">${creds.length}</span>
+                        </div>
+                        <div style="display: flex; align-items: center;">
+                            ${clearButtonHtml}
                         </div>
                     </div>
                     <div class="section-content" id="section-${sectionId}" style="
@@ -1756,6 +2330,7 @@
                         </div>
 
                         <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                            <button class="btn btn-ghost" style="font-size: 12px; padding: 6px 12px;" onclick="showCredentialDetails('${cred.id}')" title="查看详细信息">详情</button>
                             <button class="btn btn-secondary check-btn" style="font-size: 12px; padding: 6px 12px;" onclick="checkCredential('${cred.id}')">检测</button>
                             <button class="btn btn-danger" style="font-size: 12px; padding: 6px 12px;" onclick="deleteCredential('${cred.id}')">删除</button>
                         </div>
@@ -1770,6 +2345,35 @@
             `;
 
             return cardsHtml;
+        }
+
+        // AURA-X协议：清空指定分类的凭证
+        function clearCredentialSection(sectionId, sectionTitle) {
+            const creds = store.get();
+            let targetCreds = [];
+
+            if (sectionId === 'invalid') {
+                // 失效凭证：包含所有失效状态
+                const invalidStatuses = ['EXPIRED', 'NO_BALANCE', 'ERROR', 'NETWORK_ERROR', 'AUTH_ERROR', 'BANNED'];
+                targetCreds = creds.filter(c => invalidStatuses.includes(c.status));
+            } else if (sectionId === 'other') {
+                // 其他凭证：不是正常也不是失效的所有凭证
+                const activeStatuses = ['ACTIVE'];
+                const invalidStatuses = ['EXPIRED', 'NO_BALANCE', 'ERROR', 'NETWORK_ERROR', 'AUTH_ERROR', 'BANNED'];
+                targetCreds = creds.filter(c => !activeStatuses.includes(c.status) && !invalidStatuses.includes(c.status));
+            }
+
+            if (targetCreds.length === 0) {
+                showToast(`${sectionTitle}中没有可清空的凭证`, 'info');
+                return;
+            }
+
+            if (confirm(`确定要清空${sectionTitle}下的 ${targetCreds.length} 个账号吗？此操作不可撤销！`)) {
+                const remainingCreds = creds.filter(c => !targetCreds.includes(c));
+                store.set(remainingCreds);
+                showToast(`已清空${sectionTitle}下的 ${targetCreds.length} 个账号`, 'success');
+                showCredentialManagement(); // 刷新显示
+            }
         }
 
         // 切换凭证分类区域的展开/收起状态
@@ -1893,6 +2497,158 @@
                     checkBtn.innerHTML = '检测';
                 }
             }
+        }
+
+        // 显示凭证详情
+        function showCredentialDetails(id) {
+            const creds = store.get();
+            const cred = creds.find(c => c.id == id);
+            if (!cred) {
+                showToast('凭证不存在', 'error');
+                return;
+            }
+
+            // 创建详情弹窗
+            const overlay = document.createElement('div');
+            overlay.style.cssText = `
+                position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 9999;
+                display: flex; align-items: center; justify-content: center;
+            `;
+
+            const dialog = document.createElement('div');
+            dialog.style.cssText = `
+                background: var(--bg); border-radius: 12px; padding: 20px;
+                max-width: 600px; width: 90vw; max-height: 80vh; overflow-y: auto;
+                box-shadow: 0 25px 60px -12px rgba(0,0,0,.28);
+                color: var(--fg);
+            `;
+
+            // 构建 subToken 链接（如果存在）
+            const subTokenDisplay = cred.subToken ?
+                `<a href="https://portal.withorb.com/view?token=${cred.subToken}" target="_blank"
+                   style="color: #3b82f6; text-decoration: none; word-break: break-all;"
+                   title="点击查看用量详情">
+                   https://portal.withorb.com/view?token=${cred.subToken}
+                </a>` :
+                '<span style="color: var(--muted);">未设置</span>';
+
+            dialog.innerHTML = `
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                    <h2 style="margin: 0; color: var(--fg);">🔑 凭证详情</h2>
+                    <button id="close-details" class="btn btn-ghost">✕</button>
+                </div>
+
+                <div style="display: grid; gap: 16px;">
+                    <div style="background: var(--panel); border: 1px solid var(--bd); border-radius: 8px; padding: 16px;">
+                        <h4 style="margin: 0 0 12px 0; color: var(--fg); font-size: 14px; font-weight: 600;">基本信息</h4>
+                        <div style="display: grid; gap: 8px; font-size: 14px;">
+                            <div style="display: grid; grid-template-columns: 80px 1fr; gap: 12px;">
+                                <span style="color: var(--muted); font-weight: 500;">ID:</span>
+                                <span style="font-family: ui-monospace, monospace; color: var(--fg);">${cred.id || 'N/A'}</span>
+                            </div>
+                            <div style="display: grid; grid-template-columns: 80px 1fr; gap: 12px;">
+                                <span style="color: var(--muted); font-weight: 500;">邮箱:</span>
+                                <span style="color: var(--fg);">${cred.email || '未设置'}</span>
+                            </div>
+                            <div style="display: grid; grid-template-columns: 80px 1fr; gap: 12px;">
+                                <span style="color: var(--muted); font-weight: 500;">租户:</span>
+                                <span style="font-family: ui-monospace, monospace; color: var(--fg); word-break: break-all;">${cred.tenant || '未设置'}</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div style="background: var(--panel); border: 1px solid var(--bd); border-radius: 8px; padding: 16px;">
+                        <h4 style="margin: 0 0 12px 0; color: var(--fg); font-size: 14px; font-weight: 600;">令牌信息</h4>
+                        <div style="display: grid; gap: 12px; font-size: 14px;">
+                            <div>
+                                <div style="color: var(--muted); font-weight: 500; margin-bottom: 4px;">Token:</div>
+                                <div style="
+                                    font-family: ui-monospace, monospace;
+                                    background: var(--chip);
+                                    border: 1px solid var(--bd);
+                                    border-radius: 6px;
+                                    padding: 8px;
+                                    word-break: break-all;
+                                    font-size: 12px;
+                                    color: var(--fg);
+                                ">${cred.token || '<span style="color: var(--muted);">未设置</span>'}</div>
+                            </div>
+                            <div>
+                                <div style="color: var(--muted); font-weight: 500; margin-bottom: 4px;">SubToken (用量查看):</div>
+                                <div style="
+                                    font-family: ui-monospace, monospace;
+                                    background: var(--chip);
+                                    border: 1px solid var(--bd);
+                                    border-radius: 6px;
+                                    padding: 8px;
+                                    word-break: break-all;
+                                    font-size: 12px;
+                                ">${subTokenDisplay}</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    ${cred.lastBalance || cred.lastIncluded || cred.lastEndDate ? `
+                    <div style="background: var(--panel); border: 1px solid var(--bd); border-radius: 8px; padding: 16px;">
+                        <h4 style="margin: 0 0 12px 0; color: var(--fg); font-size: 14px; font-weight: 600;">账户状态</h4>
+                        <div style="display: grid; gap: 8px; font-size: 14px;">
+                            ${cred.lastBalance ? `
+                            <div style="display: grid; grid-template-columns: 80px 1fr; gap: 12px;">
+                                <span style="color: var(--muted); font-weight: 500;">余额:</span>
+                                <span style="color: var(--fg);">${cred.lastBalance}</span>
+                            </div>` : ''}
+                            ${cred.lastIncluded ? `
+                            <div style="display: grid; grid-template-columns: 80px 1fr; gap: 12px;">
+                                <span style="color: var(--muted); font-weight: 500;">总额度:</span>
+                                <span style="color: var(--fg);">${cred.lastIncluded}</span>
+                            </div>` : ''}
+                            ${cred.lastEndDate ? `
+                            <div style="display: grid; grid-template-columns: 80px 1fr; gap: 12px;">
+                                <span style="color: var(--muted); font-weight: 500;">到期时间:</span>
+                                <span style="color: var(--fg);">${new Date(cred.lastEndDate).toLocaleString()}</span>
+                            </div>` : ''}
+                        </div>
+                    </div>` : ''}
+                </div>
+
+                <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
+                    <button id="copy-details" class="btn btn-secondary">📋 复制信息</button>
+                    <button id="close-details-btn" class="btn btn-primary">关闭</button>
+                </div>
+            `;
+
+            overlay.appendChild(dialog);
+            document.body.appendChild(overlay);
+
+            // 绑定事件
+            const closeDialog = () => overlay.remove();
+            dialog.querySelector('#close-details').onclick = closeDialog;
+            dialog.querySelector('#close-details-btn').onclick = closeDialog;
+
+            // 复制详情功能
+            dialog.querySelector('#copy-details').onclick = () => {
+                const detailsText = `凭证详情:
+ID: ${cred.id || 'N/A'}
+邮箱: ${cred.email || '未设置'}
+租户: ${cred.tenant || '未设置'}
+Token: ${cred.token || '未设置'}
+SubToken: ${cred.subToken || '未设置'}
+${cred.subToken ? `用量查看链接: https://portal.withorb.com/view?token=${cred.subToken}` : ''}
+${cred.lastBalance ? `余额: ${cred.lastBalance}` : ''}
+${cred.lastIncluded ? `总额度: ${cred.lastIncluded}` : ''}
+${cred.lastEndDate ? `到期时间: ${new Date(cred.lastEndDate).toLocaleString()}` : ''}`;
+
+                navigator.clipboard?.writeText(detailsText).then(() => {
+                    showToast('详情已复制到剪贴板', 'success');
+                }).catch(() => {
+                    showToast('复制失败', 'error');
+                });
+            };
+
+            // 点击背景关闭
+            overlay.onclick = (e) => {
+                if (e.target === overlay) closeDialog();
+            };
         }
 
         // 删除凭证
@@ -2078,6 +2834,11 @@
                 if (navExport) {
                     navExport.onclick = actions.export;
                     console.log('导出数据按钮绑定完成');
+                }
+                const navSync = $('#nav-sync');
+                if (navSync) {
+                    navSync.onclick = showSyncDialog;
+                    console.log('云同步按钮绑定完成');
                 }
                 const navProxy = $('#nav-proxy');
                 if (navProxy) {
