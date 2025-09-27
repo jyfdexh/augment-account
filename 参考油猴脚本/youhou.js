@@ -19,6 +19,7 @@
 // @grant        GM_addStyle
 // @connect      portal.withorb.com
 // @connect      augmentcode.com
+// @connect      api.github.com
 // @run-at       document-end
 // ==/UserScript==
 
@@ -109,6 +110,156 @@
         push(id,rec){ const all=hist.get(); all[id]=all[id]||[]; all[id].push({ts:now(),...rec}); if(all[id].length>50) all[id].shift(); hist.set(all); } };
     const undo = { get:()=>json(GM_getValue('undo','[]'))||[], push(s){const a=undo.get();a.push({ts:now(),data:s}); if(a.length>10)a.shift(); GM_setValue('undo',JSON.stringify(a));},
         pop(){const a=undo.get(); const last=a.pop(); GM_setValue('undo',JSON.stringify(a)); return last?.data;}, has(){return undo.get().length>0;} };
+
+    // GitHub Gist 云同步管理
+    const gistSync = {
+        getConfig: () => {
+            try {
+                const config = GM_getValue('gist_sync_config', '{}');
+                const parsed = json(config) || {};
+                return { token: '', gistId: '', autoSync: false, ...parsed };
+            } catch {
+                return { token: '', gistId: '', autoSync: false };
+            }
+        },
+
+        setConfig: (config) => {
+            try {
+                GM_setValue('gist_sync_config', JSON.stringify(config));
+                return true;
+            } catch {
+                return false;
+            }
+        },
+
+        async upload(data, token, gistId = null) {
+            const url = gistId
+                ? `https://api.github.com/gists/${gistId}`
+                : 'https://api.github.com/gists';
+
+            try {
+                const response = await http(url, {
+                    method: gistId ? 'PATCH' : 'POST',
+                    headers: {
+                        'Authorization': `token ${token}`,
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/vnd.github.v3+json'
+                    },
+                    data: {
+                        description: 'Augment Account Credentials - Auto Sync',
+                        public: false,
+                        files: {
+                            'augment-creds.json': {
+                                content: JSON.stringify({
+                                    data: data,
+                                    lastSync: new Date().toISOString(),
+                                    version: '1.0'
+                                }, null, 2)
+                            }
+                        }
+                    }
+                });
+
+                return response;
+            } catch (error) {
+                if (typeof error === 'number') {
+                    if (error === 401) throw new Error('GitHub Token无效或已过期');
+                    if (error === 403) throw new Error('权限不足，请检查Token权限');
+                    if (error === 404) throw new Error('Gist不存在或无访问权限');
+                    throw new Error(`GitHub API错误: HTTP ${error}`);
+                }
+                throw new Error(`上传失败: ${error}`);
+            }
+        },
+
+        async download(token, gistId) {
+            try {
+                const response = await http(`https://api.github.com/gists/${gistId}`, {
+                    headers: {
+                        'Authorization': `token ${token}`,
+                        'Accept': 'application/vnd.github.v3+json'
+                    }
+                });
+
+                const file = response.files && response.files['augment-creds.json'];
+                if (!file) {
+                    throw new Error('Gist中未找到凭证文件');
+                }
+
+                const content = json(file.content);
+                if (!content) {
+                    throw new Error('凭证文件格式错误');
+                }
+
+                return {
+                    data: content.data || [],
+                    lastSync: content.lastSync,
+                    version: content.version
+                };
+            } catch (error) {
+                if (typeof error === 'number') {
+                    if (error === 401) throw new Error('GitHub Token无效或已过期');
+                    if (error === 403) throw new Error('权限不足，请检查Token权限');
+                    if (error === 404) throw new Error('Gist不存在或无访问权限');
+                    throw new Error(`GitHub API错误: HTTP ${error}`);
+                }
+                throw new Error(`下载失败: ${error}`);
+            }
+        },
+
+        async sync(direction = 'upload') {
+            const config = this.getConfig();
+            if (!config.token) {
+                throw new Error('请先配置 GitHub Token');
+            }
+
+            if (direction === 'upload') {
+                const localData = store.get();
+                const result = await this.upload(localData, config.token, config.gistId);
+
+                // 保存 Gist ID（首次上传时）
+                if (!config.gistId) {
+                    config.gistId = result.id;
+                    this.setConfig(config);
+                }
+
+                return { direction: 'upload', count: localData.length, gistId: result.id };
+            } else {
+                if (!config.gistId) {
+                    throw new Error('请先配置 Gist ID 或进行首次上传');
+                }
+
+                const cloudData = await this.download(config.token, config.gistId);
+                store.set(cloudData.data);
+
+                return { direction: 'download', count: cloudData.data.length, lastSync: cloudData.lastSync };
+            }
+        },
+
+        async testConnection(token) {
+            try {
+                const response = await http('https://api.github.com/user', {
+                    headers: {
+                        'Authorization': `token ${token}`,
+                        'Accept': 'application/vnd.github.v3+json'
+                    }
+                });
+
+                return {
+                    success: true,
+                    user: response.login || 'Unknown',
+                    message: `连接成功！用户: ${response.login || 'Unknown'}`
+                };
+            } catch (error) {
+                if (typeof error === 'number') {
+                    if (error === 401) return { success: false, message: 'Token无效或已过期' };
+                    if (error === 403) return { success: false, message: 'Token权限不足' };
+                    return { success: false, message: `GitHub API错误: HTTP ${error}` };
+                }
+                return { success: false, message: `连接失败: ${error}` };
+            }
+        }
+    };
 
     GM_addStyle(`
     :root{--bg:#fff;--fg:#0f172a;--muted:#64748b;--panel:#f8fafc;--bd:#e2e8f0;--chip:#eef2f7}
@@ -233,6 +384,7 @@
           <button id="act-check" class="btn btn-primary">全部检测</button>
           <button id="act-export" class="btn btn-secondary">导出</button>
           <button id="act-import" class="btn btn-ghost">导入</button>
+          <button id="act-sync" class="btn btn-ghost">☁️ 云同步</button>
           <button id="act-undo" class="btn btn-ghost" ${undo.has()?'':'disabled'}>撤销合并</button>
         </div>
         <div style="display:flex;align-items:center;gap:8px;width:100%">
@@ -320,14 +472,17 @@
             const btn = (id, dis, txt) => `<button class="btn btn-ghost" id="${id}"${dis?' disabled':''}>${txt}</button>`;
             return `<div class="pager">${btn('pg-prev', cur<=1, '上一页')}<span style="color:var(--muted)">第 ${cur} / ${pages} 页</span>${btn('pg-next', cur>=pages, '下一页')}</div>`;
         },
-        section(title, content, collapsible = false, collapsed = false){
+        section(title, content, collapsible = false, collapsed = false, extraButton = ''){
             const titleClass = collapsible ? 'section-title collapsible' + (collapsed ? ' collapsed' : '') : 'section-title';
             const contentClass = collapsible ? 'section-content' + (collapsed ? ' collapsed' : '') : '';
             const toggleIcon = collapsible ? `<span class="toggle-icon">${collapsed ? '▶' : '▼'}</span>` : '';
 
             return `
         <div class="section">
-          <div class="${titleClass}" ${collapsible ? 'data-collapsible="true"' : ''}>${toggleIcon}${title}</div>
+          <div style="display: flex; align-items: center; justify-content: space-between;">
+            <div class="${titleClass}" ${collapsible ? 'data-collapsible="true"' : ''}>${toggleIcon}${title}</div>
+            ${extraButton ? `<div>${extraButton}</div>` : ''}
+          </div>
           <div class="${contentClass}">
             ${content}
           </div>
@@ -646,8 +801,8 @@
         async manage(force=false){
             const creds=store.get();
             if(!creds.length){
-                const html=`<div class="header-stats"><div class="stat-item">🔑 <span>凭证管理</span></div><div style="margin-left:auto"><button id="act-auth" class="btn btn-secondary">获取令牌</button><button id="act-import" class="btn btn-ghost">导入</button></div></div><div class="empty-state" style="padding:20px;color:var(--muted)">暂无凭证</div>`;
-                ui.show(html); $('#act-auth').onclick=()=>actions.auth(); $('#act-import').onclick=()=>importers.open(); return;
+                const html=`<div class="header-stats"><div class="stat-item">🔑 <span>凭证管理</span></div><div style="margin-left:auto"><button id="act-auth" class="btn btn-secondary">获取令牌</button><button id="act-import" class="btn btn-ghost">导入</button><button id="act-sync" class="btn btn-ghost">☁️ 云同步</button></div></div><div class="empty-state" style="padding:20px;color:var(--muted)">暂无凭证</div>`;
+                ui.show(html); $('#act-auth').onclick=()=>actions.auth(); $('#act-import').onclick=()=>importers.open(); $('#act-sync').onclick=()=>actions.sync(); return;
             }
             const statuses={}; if(force) await Promise.all(creds.map(async c=>statuses[c.id]=await balance.check(c)));
             const updated=store.get(); if(!force) updated.forEach(c=>statuses[c.id]=c.status);
@@ -684,7 +839,7 @@
             const invalidCards = invalidList.map(c=>ui.card(c, statuses[c.id])).join('') || '<div class="empty-state" style="padding:12px;color:var(--muted)">暂无失效</div>';
 
             const bodyHTML = [
-                ui.section('✅ 正常 / 可用（分页）', `<div class="cards">${normalCards}</div>${ui.pager(view.page, pages)}`),
+                ui.section('✅ 正常 / 可用（分页）', `<div class="cards">${normalCards}</div>${ui.pager(view.page, pages)}`, false, false, normalList.length > 0 ? `<button id="check-normal" class="btn btn-primary" style="margin-left: 8px;">一键检测</button>` : ''),
                 ui.section('🔒 失效（点击展开）', `<div class="cards">${invalidCards}</div>`, true, true)
             ].join('');
 
@@ -695,6 +850,7 @@
             $('#act-check').onclick=()=>actions.batch();
             $('#act-import').onclick=()=>importers.open();
             $('#act-export').onclick=()=>exporters.open(updated);
+            $('#act-sync').onclick=()=>actions.sync();
             $('#act-undo').onclick=()=>{ const s=undo.pop(); if(s){ store.set(s); actions.manage(false);} };
             $('#sortsel').onchange=e=>{ view.sort=e.target.value; actions.manage(false); };
 
@@ -703,6 +859,14 @@
             $('#sel-del').onclick=()=>{ if(!select.size) return; if(!confirm(`删除 ${select.size} 条？`)) return; store.set(store.get().filter(x=>!select.has(x.id))); select.clear(); actions.manage(false); };
             $('#sel-export').onclick=()=>{ if(!select.size) return; exporters.open(store.get().filter(x=>select.has(x.id))); };
             $('#sel-check').onclick=()=>{ if(!select.size) return; actions.batch([...select]); };
+
+            // 检测所有正常凭证按钮
+            $('#check-normal')?.addEventListener('click', () => {
+                const normalIds = normalList.map(c => c.id);
+                if (normalIds.length > 0) {
+                    actions.batch(normalIds);
+                }
+            });
 
             // 事件绑定（全局，因为两栏都有卡片）
             $$('.selbox').forEach(cb=>cb.onchange=e=>{ const id=Number(e.target.dataset.id); if(e.target.checked) select.add(id); else select.delete(id); $('#sel-count').textContent=select.size; });
@@ -760,6 +924,9 @@
             await runPool(tasks, CFG.CONCURRENCY);
             list.forEach(c=>cardLoading.off(c.id));
             actions.manage(false);
+        },
+        sync() {
+            showSyncDialog();
         }
     };
 
@@ -849,6 +1016,282 @@
     };
 
     GM_registerMenuCommand('🚀 获取令牌', () => actions.auth());
+    // 云同步对话框
+    function showSyncDialog() {
+        const config = gistSync.getConfig();
+
+        const html = `
+        <div style="padding:16px">
+          <div style="display:flex;align-items:center;gap:8px;justify-content:space-between;margin-bottom:16px">
+            <div style="font-weight:700">☁️ GitHub Gist 云同步</div>
+            <button id="sync-close" class="btn btn-ghost">✕</button>
+          </div>
+
+          <div style="display:grid;grid-template-columns:120px 1fr;gap:12px;align-items:center;margin-bottom:16px">
+            <label style="color:var(--fg);font-weight:500">GitHub Token:</label>
+            <input id="sync-token" type="password" placeholder="ghp_xxxxxxxxxxxx" value="${config.token}"
+                   style="width:100%;padding:8px 12px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--fg);font-family:ui-monospace,monospace;font-size:12px" />
+
+            <label style="color:var(--fg);font-weight:500">Gist ID:</label>
+            <input id="sync-gist-id" placeholder="自动生成或手动输入" value="${config.gistId}"
+                   style="width:100%;padding:8px 12px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--fg);font-family:ui-monospace,monospace;font-size:12px" />
+
+            <label style="color:var(--fg);font-weight:500">自动同步:</label>
+            <label style="display:flex;align-items:center;gap:8px;color:var(--muted)">
+              <input id="sync-auto" type="checkbox" ${config.autoSync ? 'checked' : ''} />
+              数据变更时自动上传到云端
+            </label>
+          </div>
+
+          <div style="display:flex;gap:8px;justify-content:center;margin-bottom:16px">
+            <button id="sync-test" class="btn btn-primary">🔗 测试连接</button>
+            <button id="sync-save" class="btn btn-secondary">💾 保存配置</button>
+            <button id="sync-clear" class="btn btn-ghost">🗑️ 清除配置</button>
+          </div>
+
+          <div style="border-top:1px solid var(--bd);padding-top:16px">
+            <div style="display:flex;gap:8px;justify-content:center;margin-bottom:12px">
+              <button id="sync-upload" class="btn btn-primary">⬆️ 上传到云端</button>
+              <button id="sync-preview" class="btn btn-secondary">👁️ 预览云端</button>
+              <button id="sync-download" class="btn btn-secondary">⬇️ 下载覆盖</button>
+            </div>
+            <div id="sync-status" style="text-align:center;font-size:12px;color:var(--muted);min-height:20px"></div>
+          </div>
+        </div>`;
+
+        ui.show(html);
+
+        const showStatus = (msg, type = 'info') => {
+            const el = $('#sync-status');
+            if (!el) return;
+            el.textContent = msg;
+            el.style.color = type === 'error' ? '#ef4444' : type === 'success' ? '#16a34a' : 'var(--muted)';
+        };
+
+        // 绑定事件
+        $('#sync-close').onclick = () => $('#aug-overlay').remove();
+
+        $('#sync-test').onclick = async () => {
+            const token = $('#sync-token').value.trim();
+            if (!token) {
+                showStatus('请先输入 GitHub Token', 'error');
+                return;
+            }
+
+            showStatus('正在测试连接...', 'info');
+
+            try {
+                const result = await gistSync.testConnection(token);
+                showStatus(result.message, result.success ? 'success' : 'error');
+            } catch (error) {
+                showStatus(`测试失败: ${error.message}`, 'error');
+            }
+        };
+
+        $('#sync-save').onclick = () => {
+            const newConfig = {
+                token: $('#sync-token').value.trim(),
+                gistId: $('#sync-gist-id').value.trim(),
+                autoSync: $('#sync-auto').checked
+            };
+
+            if (gistSync.setConfig(newConfig)) {
+                showStatus('配置已保存', 'success');
+            } else {
+                showStatus('保存配置失败', 'error');
+            }
+        };
+
+        $('#sync-clear').onclick = () => {
+            if (confirm('确定要清除所有同步配置吗？')) {
+                gistSync.setConfig({ token: '', gistId: '', autoSync: false });
+                $('#sync-token').value = '';
+                $('#sync-gist-id').value = '';
+                $('#sync-auto').checked = false;
+                showStatus('配置已清除', 'success');
+            }
+        };
+
+        $('#sync-upload').onclick = async () => {
+            const token = $('#sync-token').value.trim();
+            if (!token) {
+                showStatus('请先输入 GitHub Token', 'error');
+                return;
+            }
+
+            showStatus('正在上传到云端...', 'info');
+
+            try {
+                const newConfig = {
+                    token: token,
+                    gistId: $('#sync-gist-id').value.trim(),
+                    autoSync: $('#sync-auto').checked
+                };
+                gistSync.setConfig(newConfig);
+
+                const result = await gistSync.sync('upload');
+                $('#sync-gist-id').value = result.gistId;
+
+                showStatus(`✅ 上传成功！已同步 ${result.count} 个凭证`, 'success');
+            } catch (error) {
+                showStatus(`❌ 上传失败: ${error.message}`, 'error');
+            }
+        };
+
+        $('#sync-preview').onclick = async () => {
+            const token = $('#sync-token').value.trim();
+            const gistId = $('#sync-gist-id').value.trim();
+
+            if (!token || !gistId) {
+                showStatus('请先输入 GitHub Token 和 Gist ID', 'error');
+                return;
+            }
+
+            showStatus('正在获取云端数据...', 'info');
+
+            try {
+                const cloudData = await gistSync.download(token, gistId);
+                $('#aug-overlay').remove();
+                showCloudDataPreview(cloudData);
+            } catch (error) {
+                showStatus(`❌ 获取失败: ${error.message}`, 'error');
+            }
+        };
+
+        $('#sync-download').onclick = async () => {
+            const token = $('#sync-token').value.trim();
+            const gistId = $('#sync-gist-id').value.trim();
+
+            if (!token || !gistId) {
+                showStatus('请先输入 GitHub Token 和 Gist ID', 'error');
+                return;
+            }
+
+            if (!confirm('下载将覆盖本地数据，确定继续吗？')) {
+                return;
+            }
+
+            showStatus('正在从云端下载...', 'info');
+
+            try {
+                const newConfig = {
+                    token: token,
+                    gistId: gistId,
+                    autoSync: $('#sync-auto').checked
+                };
+                gistSync.setConfig(newConfig);
+
+                const result = await gistSync.sync('download');
+
+                showStatus(`✅ 下载成功！已同步 ${result.count} 个凭证`, 'success');
+
+                setTimeout(() => {
+                    $('#aug-overlay').remove();
+                    actions.manage(false);
+                }, 1500);
+            } catch (error) {
+                showStatus(`❌ 下载失败: ${error.message}`, 'error');
+            }
+        };
+    }
+
+    // 云端数据预览对话框
+    function showCloudDataPreview(cloudData) {
+        const { data, lastSync } = cloudData;
+        const localData = store.get();
+
+        const html = `
+        <div style="padding:16px">
+          <div style="display:flex;align-items:center;gap:8px;justify-content:space-between;margin-bottom:16px">
+            <div style="font-weight:700">☁️ 云端数据预览</div>
+            <button id="preview-close" class="btn btn-ghost">✕</button>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+            <div style="background:var(--panel);border:1px solid var(--bd);border-radius:8px;padding:12px">
+              <h4 style="margin:0 0 8px 0;color:var(--fg)">📱 本地数据</h4>
+              <div style="color:var(--muted);font-size:12px">总计: ${localData.length} 个凭证</div>
+            </div>
+            <div style="background:var(--panel);border:1px solid var(--bd);border-radius:8px;padding:12px">
+              <h4 style="margin:0 0 8px 0;color:var(--fg)">☁️ 云端数据</h4>
+              <div style="color:var(--muted);font-size:12px">
+                总计: ${data.length} 个凭证<br>
+                最后同步: ${lastSync ? new Date(lastSync).toLocaleString() : '未知'}
+              </div>
+            </div>
+          </div>
+
+          <div style="background:var(--panel);border:1px solid var(--bd);border-radius:8px;padding:12px;margin-bottom:16px">
+            <h4 style="margin:0 0 8px 0;color:var(--fg)">📋 云端凭证预览 ${data.length > 5 ? `(显示前5个，共${data.length}个)` : `(共${data.length}个)`}</h4>
+            <div style="max-height:200px;overflow-y:auto">
+              ${data.length > 0 ? data.slice(0, 5).map(cred => `
+                <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;margin:2px 0;border-radius:4px;background:var(--chip)">
+                  <div>
+                    <strong>${cred.email || `ID:${cred.id}`}</strong>
+                    <div style="font-size:10px;color:var(--muted)">状态: ${cred.status || '未知'}</div>
+                  </div>
+                </div>
+              `).join('') : '<div style="text-align:center;color:var(--muted);padding:20px">云端暂无凭证数据</div>'}
+            </div>
+          </div>
+
+          <div style="display:flex;gap:8px;justify-content:center;margin-bottom:12px">
+            <button id="preview-download" class="btn btn-primary">⬇️ 确认下载并覆盖本地</button>
+            <button id="preview-merge" class="btn btn-secondary">🔄 智能合并（推荐）</button>
+            <button id="preview-cancel" class="btn btn-ghost">❌ 取消</button>
+          </div>
+
+          <div style="background:var(--chip);border-radius:6px;padding:8px;font-size:11px;color:var(--muted)">
+            <strong>💡 操作说明：</strong><br>
+            • <strong>确认下载：</strong>完全覆盖本地数据<br>
+            • <strong>智能合并：</strong>保留本地数据，仅添加云端新增的凭证<br>
+            • <strong>取消：</strong>关闭预览，不进行任何操作
+          </div>
+        </div>`;
+
+        ui.show(html);
+
+        $('#preview-close').onclick = () => $('#aug-overlay').remove();
+        $('#preview-cancel').onclick = () => $('#aug-overlay').remove();
+
+        $('#preview-download').onclick = async () => {
+            try {
+                store.set(data);
+                $('#aug-overlay').remove();
+                actions.manage(false);
+            } catch (error) {
+                console.error('下载失败:', error);
+            }
+        };
+
+        $('#preview-merge').onclick = async () => {
+            try {
+                const mergedData = [...localData];
+                let addedCount = 0;
+                let updatedCount = 0;
+
+                data.forEach(cloudCred => {
+                    const existingIndex = mergedData.findIndex(c => c.id === cloudCred.id);
+                    if (existingIndex >= 0) {
+                        if ((cloudCred.updatedAt || 0) >= (mergedData[existingIndex].updatedAt || 0)) {
+                            mergedData[existingIndex] = cloudCred;
+                            updatedCount++;
+                        }
+                    } else {
+                        mergedData.push(cloudCred);
+                        addedCount++;
+                    }
+                });
+
+                store.set(mergedData);
+                $('#aug-overlay').remove();
+                actions.manage(false);
+            } catch (error) {
+                console.error('合并失败:', error);
+            }
+        };
+    }
+
     GM_registerMenuCommand('🔑 管理凭证', () => actions.manage(false));
 
     if (location.href.includes('login.augmentcode.com/u/login/identifier')) setTimeout(pages.loginIdentifier, 500);
