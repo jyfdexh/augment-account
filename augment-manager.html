@@ -1320,14 +1320,24 @@
                         console.error('获取allocation失败:', e);
                     }
 
-                    return {
+                    // {{ AURA-X: Modify - 增强数据验证，提供更清晰的错误信息. Approval: 寸止(ID:1735308000). }}
+                    // 验证关键数据
+                    if (bal.credits_balance === undefined || bal.credits_balance === null) {
+                        console.warn('余额数据缺失，设置为0');
+                    }
+
+                    const result = {
                         email: customer.email,
-                        balance: bal.credits_balance,
+                        balance: bal.credits_balance || 0,
                         endDate: item.end_date,
                         included
                     };
+
+                    console.log('解析成功的订阅信息:', result);
+                    return result;
                 } catch (error) {
                     console.error('获取订阅信息失败:', error);
+                    // 保持原始错误信息，让上层更好地分类处理
                     throw error;
                 }
             },
@@ -1390,12 +1400,14 @@
 
                     console.log(`最终状态: ${status}`);
 
+                    // {{ AURA-X: Modify - 成功检测时清除lastError字段. Approval: 寸止(ID:1735308000). }}
                     const updatedCred = {
                         ...cred,
                         status,
                         lastBalance: info.balance,
                         lastEndDate: info.endDate,
                         lastIncluded: info.included,
+                        lastError: null, // 清除之前的错误信息
                         updatedAt: Date.now()
                     };
                     this.updateCredential(updatedCred);
@@ -1404,13 +1416,19 @@
                 } catch (error) {
                     console.error('检测凭证失败:', error);
 
+                    // {{ AURA-X: Modify - 更精确的错误分类，避免将数据解析错误误判为网络错误. Approval: 寸止(ID:1735308000). }}
                     // 根据错误类型提供更详细的状态和用户提示
                     let errorStatus = 'ERROR';
                     let errorMessage = error.message;
+
                     if (error.message.includes('Token无效')) {
                         errorStatus = 'NO_TOKEN';
                         errorMessage = 'Token无效或已过期';
-                    } else if (error.message.includes('CORS') || error.message.includes('Failed to fetch')) {
+                    } else if (error.message.includes('认证失败')) {
+                        errorStatus = 'AUTH_ERROR';
+                        errorMessage = '认证失败';
+                    } else if (error.name === 'TypeError' && (error.message.includes('Failed to fetch') || error.message.includes('NetworkError'))) {
+                        // 真正的网络错误
                         errorStatus = 'NETWORK_ERROR';
                         errorMessage = '网络连接问题';
 
@@ -1426,9 +1444,15 @@
                                 '稍后重试'
                             ]
                         );
-                    } else if (error.message.includes('认证失败')) {
-                        errorStatus = 'AUTH_ERROR';
-                        errorMessage = '认证失败';
+                    } else if (error.message.includes('CORS')) {
+                        // CORS错误
+                        errorStatus = 'NETWORK_ERROR';
+                        errorMessage = 'CORS限制';
+                    } else {
+                        // 其他错误（数据解析错误等）
+                        errorStatus = 'ERROR';
+                        errorMessage = `检测失败: ${error.message}`;
+                        console.log('数据解析或其他错误，不是网络问题:', error);
                     }
 
                     const updatedCred = {
@@ -2857,10 +2881,11 @@
             const showClearButton = sectionId === 'invalid' || sectionId === 'other';
             const showCheckButton = sectionId === 'active';
 
+            // {{ AURA-X: Modify - 增大按钮字体大小. Approval: 寸止(ID:1735308000). }}
             const clearButtonHtml = showClearButton ? `
                 <button class="btn btn-danger btn-sm"
                         onclick="clearCredentialSection('${sectionId}', '${title}')"
-                        style="margin-left: 8px; font-size: 11px; padding: 4px 8px;"
+                        style="margin-left: 8px; font-size: 14px; padding: 6px 12px; font-weight: 600;"
                         title="清空${title}下的所有账号">
                     🗑️ 清空
                 </button>
@@ -2869,7 +2894,7 @@
             const checkButtonHtml = showCheckButton ? `
                 <button class="btn btn-primary btn-sm"
                         onclick="checkAllActiveCredentials()"
-                        style="margin-left: 8px; font-size: 11px; padding: 4px 8px;"
+                        style="margin-left: 8px; font-size: 14px; padding: 6px 12px; font-weight: 600;"
                         title="检测所有正常凭证的状态">
                     🔄 一键检测
                 </button>
@@ -2877,13 +2902,14 @@
 
             let cardsHtml = `
                 <div class="credential-section ${expandedClass}" style="margin-bottom: 20px;">
+                    <!-- {{ AURA-X: Modify - 整个header区域都可以点击展开. Approval: 寸止(ID:1735308000). }} -->
                     <div class="section-header" style="
                         display: flex; align-items: center; justify-content: space-between;
                         background: var(--panel); border: 1px solid var(--bd); border-radius: 8px;
-                        padding: 12px 16px; user-select: none;
+                        padding: 12px 16px; user-select: none; cursor: pointer;
                         transition: all 0.2s ease;
-                    ">
-                        <div style="display: flex; align-items: center; gap: 8px; cursor: pointer;" onclick="toggleCredentialSection('${sectionId}')">
+                    " onclick="toggleCredentialSection('${sectionId}')">
+                        <div style="display: flex; align-items: center; gap: 8px;">
                             <span class="arrow-icon" style="font-size: 12px; transition: transform 0.2s ease;">${arrowIcon}</span>
                             <h3 style="margin: 0; font-size: 16px; font-weight: 600;">${title}</h3>
                             <span style="
@@ -2891,7 +2917,7 @@
                                 padding: 2px 8px; border-radius: 12px; font-size: 12px;
                             ">${creds.length}</span>
                         </div>
-                        <div style="display: flex; align-items: center;">
+                        <div style="display: flex; align-items: center;" onclick="event.stopPropagation();">
                             ${clearButtonHtml}
                             ${checkButtonHtml}
                         </div>
