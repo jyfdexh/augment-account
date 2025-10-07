@@ -2829,8 +2829,8 @@
                 const chipStyle = 'background: var(--chip); color: var(--fg); border: 1px solid var(--bd);';
 
                 expiryInfoHtml = `
-                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;">
-                        ${balance && included ? `<span style="padding: 3px 8px; border-radius: 6px; font-family: ui-monospace, monospace; font-size: 14px; font-weight: 600; background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0;">${Math.round(balance)} / ${Math.round(included)}</span>` : ''}
+                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: nowrap; white-space: nowrap;">
+                        ${balance && included ? `<span style="padding: 3px 8px; border-radius: 6px; font-family: ui-monospace, monospace; font-size: 14px; font-weight: 600; background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0;">${Math.round(balance)}/${Math.round(included)}</span>` : ''}
                         <span style="padding: 3px 8px; border-radius: 6px; font-family: ui-monospace, monospace; font-size: 14px; font-weight: 500; ${chipStyle}">${expiryInfo.formattedDate}</span>
                         <span style="padding: 3px 8px; border-radius: 6px; font-family: ui-monospace, monospace; font-size: 14px; font-weight: 600; ${chipStyle}">${expiryInfo.daysText}</span>
                     </div>
@@ -2838,8 +2838,8 @@
             } else if (isCommunity && (balance || included)) {
                 // 社区账号（没有过期时间）
                 expiryInfoHtml = `
-                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;">
-                        ${balance && included ? `<span style="padding: 3px 8px; border-radius: 6px; font-family: ui-monospace, monospace; font-size: 14px; font-weight: 600; background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0;">${Math.round(balance)} / ${Math.round(included)}</span>` : ''}
+                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: nowrap; white-space: nowrap;">
+                        ${balance && included ? `<span style="padding: 3px 8px; border-radius: 6px; font-family: ui-monospace, monospace; font-size: 14px; font-weight: 600; background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0;">${Math.round(balance)}/${Math.round(included)}</span>` : ''}
                         <span style="padding: 3px 8px; border-radius: 6px; font-family: ui-monospace, monospace; font-size: 14px; font-weight: 500; background: var(--chip); color: var(--fg); border: 1px solid var(--bd);">社区计划（每月）</span>
                     </div>
                 `;
