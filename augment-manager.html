@@ -1720,11 +1720,18 @@
                 
                 <div style="display: grid; grid-template-columns: 120px 1fr; gap: 15px; align-items: center; margin-bottom: 20px;">
                     <label style="color: var(--fg); font-weight: 500;">GitHub Token:</label>
-                    <input id="sync-token" type="password" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" value="${config.token}" style="
-                        width: 100%; padding: 8px 12px; border: 1px solid var(--bd);
-                        border-radius: 8px; background: var(--bg); color: var(--fg);
-                        font-family: ui-monospace, monospace; font-size: 12px;
-                    " />
+                    <div style="position: relative; display: flex; align-items: center;">
+                        <input id="sync-token" type="password" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" value="${config.token}" style="
+                            width: 100%; padding: 8px 12px; border: 1px solid var(--bd);
+                            border-radius: 8px; background: var(--bg); color: var(--fg);
+                            font-family: ui-monospace, monospace; font-size: 12px; padding-right: 36px;
+                        " />
+                        <button id="toggle-token-visibility" type="button" title="显示 Token" style="
+                            position: absolute; right: 8px; height: 26px; display: inline-flex; align-items: center; justify-content: center;
+                            padding: 0 6px; border-radius: 6px; border: 1px solid var(--bd); background: transparent; color: var(--muted);
+                            cursor: pointer;
+                        ">👁️</button>
+                    </div>
                     
                     <label style="color: var(--fg); font-weight: 500;">Gist ID:</label>
                     <input id="sync-gist-id" placeholder="自动生成或手动输入" value="${config.gistId}" style="
@@ -1782,6 +1789,19 @@
                 overlay.remove();
                 showPresetConfigDialog();
             };
+            
+            // Token 可见性切换（内联眼睛按钮）
+            const tokenInput = $('#sync-token');
+            const toggleTokenBtn = $('#toggle-token-visibility');
+            if (tokenInput && toggleTokenBtn) {
+                let tokenVisible = false;
+                toggleTokenBtn.onclick = () => {
+                    tokenVisible = !tokenVisible;
+                    tokenInput.type = tokenVisible ? 'text' : 'password';
+                    toggleTokenBtn.textContent = tokenVisible ? '🙈' : '👁️';
+                    toggleTokenBtn.title = tokenVisible ? '隐藏 Token' : '显示 Token';
+                };
+            }
             
             // 快速填写按钮 - 拆分Token/GistID
             $('#quick-fill-btn').onclick = () => {
