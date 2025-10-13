@@ -462,6 +462,7 @@
           <div>
             <button class="btn btn-secondary" data-check="${cNorm.id}">检测</button>
             ${subURL?`<a class="btn btn-secondary" href="${subURL}" target="_blank">订阅</a>`:''}
+            <button class="btn btn-secondary" data-export="${cNorm.id}">导出</button>
             <button class="btn btn-danger" data-del="${cNorm.id}">删除</button>
           </div>
         </div>
@@ -514,7 +515,7 @@
             const html = `
         <div style="padding:12px">
           <div style="display:flex;align-items:center;gap:8px;justify-content:space-between;margin-bottom:8px">
-            <div style="font-weight:700">导入（二选一）</div>
+            <div style="font-weight:700">导入（三选一）</div>
             <div>
               <button id="dlg-close" class="btn btn-ghost">关闭</button>
             </div>
@@ -523,6 +524,7 @@
           <div class="tabs">
             <div class="tab active" data-tab="paste">粘贴导入(JSON/JSONL/CSV)</div>
             <div class="tab" data-tab="manual">手动填写导入(可选填)</div>
+            <div class="tab" data-tab="subtoken">仅订阅令牌(查额度)</div>
           </div>
 
           <div class="tab-panel active" id="panel-paste">
@@ -556,6 +558,23 @@
             </div>
             <div id="mi-msg" style="margin-top:6px;color:#166534;font-size:12px"></div>
           </div>
+
+          <div class="tab-panel" id="panel-subtoken">
+            <div style="background:var(--chip);border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:12px;color:var(--muted)">
+              <strong>💡 快速导入：</strong>只需填写 subToken（订阅令牌）即可查看额度信息，Email可选填用于备注识别。
+            </div>
+            <div class="form-grid">
+              <label style="color:#ef4444">subToken <span style="font-size:10px">*必填</span></label>
+              <input id="st-sub" class="ipt" placeholder="必填，例如 IkM1R1poTlNaNTVuU3V3elgi.yv57KSI...">
+              <label>Email <span style="font-size:10px;color:var(--muted)">选填</span></label>
+              <input id="st-email" class="ipt" placeholder="选填，用于识别，例如 a@example.com">
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+              <button id="st-add" class="btn btn-secondary">添加一条并继续</button>
+              <button id="st-done" class="btn btn-primary">添加并完成</button>
+            </div>
+            <div id="st-msg" style="margin-top:6px;color:#166534;font-size:12px"></div>
+          </div>
         </div>`;
             const el = ui.show(html); const ov=$('#aug-overlay');
             const exit=()=>{ try{el.remove();}catch{} try{ov.remove();}catch{} actions.manage(false); };
@@ -567,7 +586,8 @@
                     el.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
                     el.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
                     tab.classList.add('active');
-                    const id = tab.dataset.tab==='paste' ? '#panel-paste' : '#panel-manual';
+                    const tabName = tab.dataset.tab;
+                    const id = tabName === 'paste' ? '#panel-paste' : tabName === 'subtoken' ? '#panel-subtoken' : '#panel-manual';
                     el.querySelector(id).classList.add('active');
                 };
             });
@@ -606,6 +626,48 @@
             }
             $('#mi-add').onclick=()=>addOnce(true);
             $('#mi-done').onclick=()=>{ if(addOnce(false)) exit(); };
+
+            // 仅 subToken 导入
+            function extractSubToken(input){
+                input = (input||'').trim();
+                if(!input) return '';
+                // 如果包含 URL，尝试提取 token 参数
+                if(input.includes('withorb.com') || input.includes('token=')){
+                    try{
+                        const url = new URL(input);
+                        const token = url.searchParams.get('token');
+                        if(token) return token;
+                    } catch {}
+                    // 如果URL解析失败，尝试正则提取
+                    const match = input.match(/[?&]token=([^&]+)/);
+                    if(match) return match[1];
+                }
+                // 否则返回原始输入
+                return input;
+            }
+            function collectSubToken(){
+                const rawInput = ($('#st-sub').value||'').trim();
+                const sub = extractSubToken(rawInput);
+                const email = ($('#st-email').value||'').trim();
+                if(!sub){ ui.toast('请填写 subToken'); return null; }
+                return { 
+                    email: email || '', 
+                    tenant: '', 
+                    token: '', 
+                    subToken: sub, 
+                    status: 'UNKNOWN' 
+                };
+            }
+            function addSubToken(showMsg=true){
+                const data = collectSubToken();
+                if(!data) return false;
+                store.add(data);
+                if(showMsg){ $('#st-msg').textContent='已添加，您可继续填写下一条…'; setTimeout(()=>$('#st-msg').textContent='', 1500); }
+                $('#st-sub').value=''; $('#st-email').value='';
+                return true;
+            }
+            $('#st-add').onclick=()=>addSubToken(true);
+            $('#st-done').onclick=()=>{ if(addSubToken(false)) exit(); };
         }
     };
 
@@ -765,6 +827,7 @@
                 const status = expired?'EXPIRED': info.balance<=0?'NO_BALANCE':'ACTIVE';
                 store.update(cred.id,{
                     status,
+                    email: info.email || cred.email,
                     lastBalance:info.balance,
                     lastEndDate:info.endDate,
                     lastIncluded:info.included
@@ -872,6 +935,7 @@
             $$('.selbox').forEach(cb=>cb.onchange=e=>{ const id=Number(e.target.dataset.id); if(e.target.checked) select.add(id); else select.delete(id); $('#sel-count').textContent=select.size; });
             $$('[data-del]').forEach(x=>x.onclick=()=>confirm('确定删除？')&&(store.del(+x.dataset.del), actions.manage(false)));
             $$('[data-check]').forEach(x=>x.onclick=()=>actions.check(+x.dataset.check));
+            $$('[data-export]').forEach(x=>x.onclick=()=>{ const id=+x.dataset.export; const cred=store.get().find(c=>c.id===id); if(cred) exporters.open([cred]); });
             $$('.line.copy').forEach(line=>{
                 line.addEventListener('click', ()=>{
                     const val = line.dataset.copy ?? line.querySelector('.v')?.textContent ?? '';
@@ -995,6 +1059,65 @@
             const { email } = json(GM_getValue('oauth','{}')) || {}; if(!email) return;
             let input; for(let i=0;i<40;i++){ input=document.querySelector('#username'); if(input) break; await sleep(500); }
             if(!input) return; input.value=email; input.dispatchEvent(new Event('input',{bubbles:true})); input.dispatchEvent(new Event('change',{bubbles:true})); input.readOnly=true; input.setAttribute('aria-readonly','true');
+        },
+        async authContinue(){
+            const { email } = json(GM_getValue('oauth','{}')) || {}; if(!email) return;
+            console.log('处理 auth/continue 页面');
+            let code, tenant;
+            // 方法1：从 input#codeDisplay 的 value 属性中提取 JSON
+            const inputElement = document.querySelector('#codeDisplay');
+            if (inputElement && inputElement.value) {
+                try {
+                    const jsonData = JSON.parse(inputElement.value);
+                    code = jsonData.code;
+                    tenant = jsonData.tenant_url;
+                    console.log('从 input 元素提取到:', { code, tenant });
+                } catch (e) {
+                    console.error('解析 input JSON 失败:', e);
+                }
+            }
+            // 方法2：从页面 script 标签中提取（备用）
+            if (!code || !tenant) {
+                for (const s of document.scripts){
+                    const t = s.textContent;
+                    if(t.includes('code:') && t.includes('tenant_url:')){
+                        code = t.match(/code:\s*["']([^"']+)["']/)?.[1];
+                        tenant = t.match(/tenant_url:\s*["']([^"']+)["']/)?.[1];
+                        if(code && tenant) {
+                            console.log('从 script 标签提取到:', { code, tenant });
+                            break;
+                        }
+                    }
+                }
+            }
+            // 方法3：直接从页面文本中用正则提取 JSON（最后的备用方案）
+            if (!code || !tenant) {
+                const bodyText = document.body.textContent;
+                const match = bodyText.match(/\{"code":"([^"]+)","state":"[^"]+","tenant_url":"([^"]+)"\}/);
+                if (match) {
+                    code = match[1];
+                    tenant = match[2];
+                    console.log('从页面文本提取到:', { code, tenant });
+                }
+            }
+            console.log('最终提取到的信息:', { code, tenant });
+            if(!code || !tenant) {
+                console.error('未能提取到 code 或 tenant');
+                return;
+            }
+            try{
+                console.log('开始获取 token...');
+                const token = await oauth.token(tenant, code);
+                console.log('Token 获取成功:', token);
+                store.add({ tenant, token, email });
+                GM_setValue('oauth','');
+                console.log('800ms后跳转到订阅页面');
+                setTimeout(() => {
+                    location.href = 'https://app.augmentcode.com/account/subscription';
+                }, 800);
+            } catch(e) {
+                console.error('获取token失败:', e);
+            }
         },
         async terms(){
             const { email } = json(GM_getValue('oauth','{}')) || {}; if(!email) return;
@@ -1295,6 +1418,7 @@
     GM_registerMenuCommand('🔑 管理凭证', () => actions.manage(false));
 
     if (location.href.includes('login.augmentcode.com/u/login/identifier')) setTimeout(pages.loginIdentifier, 500);
+    if (location.pathname.includes('/auth/continue')) setTimeout(pages.authContinue, 1000);
     if (location.pathname.includes('terms-accept')) setTimeout(pages.terms, 1000);
     if (location.href.includes('app.augmentcode.com/account/subscription')) setTimeout(pages.subscription, 600);
 
